@@ -80,8 +80,9 @@ import {
 } from "../shared/worktree.ts";
 import {
   normalizeSubagentTitle,
-  SubagentStripWidget,
   selectSubagentStripEntry,
+  subagentStripEntryKey,
+  SubagentStripWidget,
 } from "./navigation.ts";
 import {
   type AgentType,
@@ -368,6 +369,7 @@ export default function (pi: ExtensionAPI) {
   const widgetKey = "subagent-navigation";
   let navigationManager: SubagentManagerShape | undefined;
   let widgetVisible = false;
+  let widgetEntryKey: string | undefined;
   let requestWidgetRender: (() => void) | undefined;
   let navigationLayerRegistered = false;
   let dashboardOpen = false;
@@ -423,10 +425,19 @@ export default function (pi: ExtensionAPI) {
   const updateSubagentWidget = () => {
     const ctx = sessionContext;
     if (!ctx || ctx.mode !== "tui") return;
-    const visible = Boolean(stripEntry());
-    if (visible === widgetVisible) return;
+    const entry = stripEntry();
+    const visible = Boolean(entry);
+    const entryKey = subagentStripEntryKey(entry);
+    if (visible === widgetVisible) {
+      if (visible && entryKey !== widgetEntryKey) {
+        widgetEntryKey = entryKey;
+        requestWidgetRender?.();
+      }
+      return;
+    }
     if (!visible) {
       stripState.focused = false;
+      widgetEntryKey = undefined;
       requestWidgetRender = undefined;
       ctx.ui.setWidget(widgetKey, undefined);
       widgetVisible = false;
@@ -441,6 +452,7 @@ export default function (pi: ExtensionAPI) {
       { placement: "belowEditor" },
     );
     widgetVisible = true;
+    widgetEntryKey = entryKey;
   };
 
   const updateStatus = (manager: SubagentManagerShape) => {
@@ -597,6 +609,7 @@ export default function (pi: ExtensionAPI) {
     ui = undefined;
     navigationManager = undefined;
     widgetVisible = false;
+    widgetEntryKey = undefined;
     requestWidgetRender = undefined;
     stripState.focused = false;
     dashboardOpen = false;
