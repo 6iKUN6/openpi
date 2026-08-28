@@ -44,6 +44,7 @@ import {
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+  createStatusWriter,
   formatActivityStatus,
   hasActivity,
   unreadActivityCounts,
@@ -366,6 +367,7 @@ export default function (pi: ExtensionAPI) {
    */
   let settledAcknowledgedAt = 0;
   const stripState = new BelowEditorStripState();
+  const statusWriter = createStatusWriter("subagents");
   const widgetKey = "subagent-navigation";
   let navigationManager: SubagentManagerShape | undefined;
   let widgetVisible = false;
@@ -464,8 +466,8 @@ export default function (pi: ExtensionAPI) {
     // In the TUI the below-editor strip already reports the same activity and
     // carries the manage affordance, so a footer status line would repeat it.
     const tui = sessionContext?.mode === "tui";
-    ui.setStatus(
-      "subagents",
+    statusWriter.write(
+      ui,
       !tui && hasActivity(counts)
         ? formatActivityStatus(ui.theme, "subagents", counts)
         : undefined,
@@ -605,6 +607,7 @@ export default function (pi: ExtensionAPI) {
     } catch {
       // UI may already be disposed.
     }
+    statusWriter.reset();
     sessionContext = undefined;
     ui = undefined;
     navigationManager = undefined;
