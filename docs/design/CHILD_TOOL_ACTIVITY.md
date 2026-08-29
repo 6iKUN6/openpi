@@ -5,6 +5,7 @@
 - Verified: 2026-08-30
 - Source boundary: OpenPI implementation and tests in the pull request that closes issue #93
 - Related issue: https://github.com/openpi-dev/openpi/issues/93
+- Related pull request: https://github.com/openpi-dev/openpi/pull/292
 - Supersedes: none
 
 ## Goal
