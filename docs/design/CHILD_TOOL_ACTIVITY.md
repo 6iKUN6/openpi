@@ -1,5 +1,12 @@
 # Child Tool Activity Design
 
+- Status: validated
+- Created: 2026-08-29
+- Verified: 2026-08-30
+- Source boundary: OpenPI implementation and tests in the pull request that closes issue #93
+- Related issue: https://github.com/openpi-dev/openpi/issues/93
+- Supersedes: none
+
 ## Goal
 
 Issue #93 requires Direct Subagent and Workflow child transcript pages to use
@@ -9,7 +16,7 @@ Pi expansion binding reveals Pi's native call and result evidence.
 
 ## Scope and Boundaries
 
-This changes only the operator-facing child-session page. It must not change
+This changes only the operator-facing child-session page. It does not change
 child tool definitions, tool schemas, execution, permissions, model-visible
 messages, transcript artifacts, replay data, or provider requests.
 
@@ -51,11 +58,15 @@ Both entry points supply the initial state through the shared page:
 The Direct and Workflow document adapters remain projections into the same
 renderer. There is no duplicate formatter or child-specific tool definition.
 
-## Verification
+## Validation
 
-Focused tests will prove that a wrapped Bash child call is one compact row by
+Focused tests prove that a wrapped Bash child call is one compact row by
 default, reveals its command and output through the native renderer when the
-configured expansion binding is used, and returns to the compact row. Tests
-will also cover inherited initial expansion, Direct/Workflow parity, pending,
-success, error, long output, and narrow width behavior. The full repository
-checks are `bun run check` and `bun run test`.
+configured expansion binding is used, and returns to the compact row. Existing
+activity-renderer tests cover pending, success, error, long output, narrow
+width, and all supported tool kinds. Direct and Workflow parity is asserted
+against the same renderer output.
+
+The repository gates are `bun run check` and `bun run test`. Manual Pi smoke
+covered Direct Subagent and Workflow child pages, compact and expanded output,
+parent-state inheritance, page-local toggling, and Nerd Font icons.
