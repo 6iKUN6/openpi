@@ -112,6 +112,7 @@ function subagentEntry(status: SubagentSnapshot["status"]): SubagentStripEntry {
     meta: { backend: "pi", modelLabel: "bench-model" },
     usage: { tokens: 24_000, contextWindow: 200_000 },
     transcript: [],
+    transcriptVersion: 0,
     liveTools: [],
     queued: [],
     finalText: status === "running" ? "" : "done",
