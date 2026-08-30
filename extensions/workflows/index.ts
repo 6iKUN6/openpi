@@ -52,13 +52,13 @@ import {
   createStatusWriter,
   formatActivityStatus,
 } from "../shared/activity-status.ts";
+import { fitNavigationSides } from "../shared/below-editor-navigation.ts";
 import { waitBounded } from "../shared/child-session.ts";
 import { contextPercent } from "../shared/context-utilization.ts";
 import {
   registerEditorLayer,
   removeEditorLayer,
 } from "../shared/editor-layers.ts";
-import { fitNavigationSides } from "../shared/below-editor-navigation.ts";
 import { loadSetupConfig } from "../shared/setup-config.ts";
 import { SPINNER_INTERVAL_MS } from "../shared/spinner.ts";
 import {
@@ -90,6 +90,14 @@ import {
   persistWorkflowJson,
   persistWorkflowTerminalState,
 } from "./artifacts.ts";
+import {
+  buildExpandedWorkflowCompletion,
+  buildWorkflowCompletionDisplay,
+  isWorkflowCompletionDisplay,
+  workflowCompletionAlerts,
+  workflowCompletionResultPreview,
+  workflowCompletionSummary,
+} from "./completion-projection.ts";
 import { RunController } from "./controller.ts";
 import {
   resolveWorkflowLaunchPolicy,
@@ -125,6 +133,7 @@ import {
   agentContext,
   aggregateUsage,
   appendLog,
+  compactWorkflowToolDetails,
   countStates,
   createUsageReader,
   emptyUsage,
@@ -159,7 +168,7 @@ import {
 import {
   buildBackgroundWorkflowFollowUp,
   buildBackgroundWorkflowLaunchResult,
-  buildProjectedWorkflowCompletionBatch,
+  buildProjectedWorkflowCompletionBatches,
   buildProjectedWorkflowResultMessage,
   buildWorkflowAgentPrompt,
   buildWorkflowResultMessage,
@@ -175,14 +184,14 @@ import {
   WORKFLOW_TOOL_DESCRIPTION,
 } from "./prompt.ts";
 import {
-  createWorkflowResultDelivery,
-  type WorkflowCompletionEnvelope,
-} from "./result-delivery.ts";
-import {
   beginProcessReplayWorkspaceLease,
   createReplayIdentity,
   isReplaySafeAgentCall,
 } from "./replay-safety.ts";
+import {
+  createWorkflowResultDelivery,
+  type WorkflowCompletionEnvelope,
+} from "./result-delivery.ts";
 import {
   createWorkflowResources,
   runAgent,
@@ -191,7 +200,7 @@ import {
   type WorkflowModel,
 } from "./runner.ts";
 import { runWorkflowSandbox } from "./sandbox.ts";
-import { safeStringify, writeFileAtomic } from "./serialization.ts";
+import { writeFileAtomic } from "./serialization.ts";
 import {
   finalizeWorktreeHandoff,
   prepareWorktreeHandoff,
@@ -647,21 +656,6 @@ function appendArtifactPersistenceFailure(
     ? `${details.error}; ${persistenceFailure}`
     : persistenceFailure;
 }
-
-function compactToolDetails(details: WorkflowDetails): WorkflowDetails {
-  return {
-    ...details,
-    ...(details.result !== undefined
-      ? {
-          result: JSON.parse(
-            safeStringify(details.result, { maxBytes: 64 * 1024 }),
-          ),
-        }
-      : {}),
-    agents: details.agents.map((agent) => ({ ...agent, transcript: [] })),
-  };
-}
-
 export interface ActiveWorkflowRunLifecycle {
   details: WorkflowDetails;
   controller: Pick<RunController, "abort" | "settle">;
@@ -834,27 +828,28 @@ export default function workflows(pi: ExtensionAPI) {
         details,
       ),
     deliver: async (envelopes, wake) => {
-      const content = buildProjectedWorkflowCompletionBatch(
-        envelopes.map((envelope) => ({
-          deliveryId: envelope.deliveryId,
-          details: envelope.details,
-          runDir: path.join(getAgentDir(), "workflows", envelope.runId),
-        })),
+      const sourceEntries = envelopes.map((envelope) => ({
+        deliveryId: envelope.deliveryId,
+        details: envelope.details,
+        runDir: path.join(getAgentDir(), "workflows", envelope.runId),
+      }));
+      const batches = buildProjectedWorkflowCompletionBatches(
+        sourceEntries,
         lastContext?.getContextUsage?.(),
       );
-      pi.sendMessage(
-        {
-          customType: "workflow-result",
-          content,
-          display: true,
-          ...(envelopes.length === 1
-            ? { details: compactToolDetails(envelopes[0]!.details) }
-            : {}),
-        },
-        wake
-          ? { deliverAs: "followUp", triggerTurn: true }
-          : { deliverAs: "nextTurn" },
-      );
+      for (const batch of batches) {
+        pi.sendMessage(
+          {
+            customType: "workflow-result",
+            content: batch.content,
+            display: true,
+            details: buildWorkflowCompletionDisplay(batch.entries),
+          },
+          wake
+            ? { deliverAs: "followUp", triggerTurn: true }
+            : { deliverAs: "nextTurn" },
+        );
+      }
       return envelopes.map((envelope) => ({
         deliveryId: envelope.deliveryId,
         delivered: true,
@@ -1295,7 +1290,7 @@ export default function workflows(pi: ExtensionAPI) {
         if (background) return;
         onUpdate?.({
           content: [{ type: "text", text: summaryLine(details) }],
-          details: compactToolDetails(details),
+          details: compactWorkflowToolDetails(details),
         });
       };
       const emit = (checkpoint = true) => {
@@ -1392,9 +1387,9 @@ export default function workflows(pi: ExtensionAPI) {
 
       // The script's narrator. Unlike phase(), this is append-only progress
       // text, so it never mutates the phase list a run is judged against.
-      const logFn = (text: string) => {
+      const logFn = (text: string, kind?: "pipeline-drop") => {
         if (runSettled) return;
-        appendLog(details, text, Date.now());
+        appendLog(details, text, Date.now(), kind);
         emit();
       };
 
@@ -2250,7 +2245,7 @@ export default function workflows(pi: ExtensionAPI) {
               }),
             },
           ],
-          details: compactToolDetails(details),
+          details: compactWorkflowToolDetails(details),
         };
       }
 
@@ -2279,7 +2274,7 @@ export default function workflows(pi: ExtensionAPI) {
             ),
           },
         ],
-        details: compactToolDetails(details),
+        details: compactWorkflowToolDetails(details),
       };
     },
 
@@ -2485,7 +2480,6 @@ export default function workflows(pi: ExtensionAPI) {
   pi.registerMessageRenderer(
     "workflow-result",
     (message, { expanded }, theme) => {
-      const details = message.details as WorkflowDetails | undefined;
       const body =
         typeof message.content === "string"
           ? message.content
@@ -2493,18 +2487,73 @@ export default function workflows(pi: ExtensionAPI) {
               ?.map((part) => (part.type === "text" ? part.text : ""))
               .join("") ?? "");
       const safeBody = sanitizeWorkflowDisplayText(body);
-      if (!details) return new Text(safeBody, 0, 0);
-      const headerParts = runHeader(details, theme, Date.now());
-      const header = headerParts.right
-        ? `${headerParts.left} ${headerParts.right}`
-        : headerParts.left;
-      if (expanded) return new Text(`${header}\n\n${safeBody}`, 0, 0);
-      const preview = safeBody.split("\n").slice(0, 8).join("\n");
-      return new Text(
-        `${header}\n${preview}\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`,
-        0,
-        0,
-      );
+      const display = isWorkflowCompletionDisplay(message.details)
+        ? message.details
+        : undefined;
+      const legacyDetails = isWorkflowRenderDetails(message.details)
+        ? message.details
+        : undefined;
+      if (!display && !legacyDetails) {
+        return new Text(safeBody, 0, 0);
+      }
+      if (legacyDetails) {
+        const headerParts = runHeader(legacyDetails, theme, Date.now());
+        const header = headerParts.right
+          ? `${headerParts.left} ${headerParts.right}`
+          : headerParts.left;
+        if (expanded) return new Text(`${header}\n\n${safeBody}`, 0, 0);
+        const preview = safeBody.split("\n").slice(0, 8).join("\n");
+        return new Text(
+          `${header}\n${preview}\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`,
+          0,
+          0,
+        );
+      }
+      if (!display) return new Text(safeBody, 0, 0);
+      if (expanded) {
+        return new Text(buildExpandedWorkflowCompletion(display), 0, 0);
+      }
+      return {
+        render(width: number) {
+          const rows: string[] = [];
+          for (const entry of display.entries) {
+            rows.push(
+              truncateToWidth(
+                `${statusGlyph(entry.status, theme, Date.now())} ${workflowCompletionSummary(entry)}`,
+                width,
+                "…",
+              ),
+            );
+            for (const alert of workflowCompletionAlerts(entry)) {
+              rows.push(
+                truncateToWidth(`  ${theme.fg("error", alert)}`, width, "…"),
+              );
+            }
+            const result = workflowCompletionResultPreview(entry);
+            if (result) {
+              rows.push(
+                truncateToWidth(
+                  `  ${theme.fg("accent", "Result:")} ${result}`,
+                  width,
+                  "…",
+                ),
+              );
+            }
+          }
+          rows.push(
+            truncateToWidth(
+              theme.fg(
+                "muted",
+                `(${keyHint("app.tools.expand", "to expand")})`,
+              ),
+              width,
+              "…",
+            ),
+          );
+          return rows;
+        },
+        invalidate() {},
+      };
     },
   );
 }
