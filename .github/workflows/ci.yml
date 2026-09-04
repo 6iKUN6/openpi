@@ -145,6 +145,15 @@ jobs:
           test -s "$root/source/web/dist/styles.css"
           test -s "$root/source/web/dist/favicon.svg"
           npm install --prefix "$root/source" --ignore-scripts --omit=dev --no-audit --no-fund
+          test ! -e "$root/source/node_modules/@earendil-works/pi-coding-agent"
+          # Exercise the CLI with the lockfile's Pi host, not package-owned peers.
+          mkdir -p "$root/source/node_modules/@earendil-works"
+          for peer in pi-ai pi-coding-agent pi-tui; do
+            ln -s \
+              "$PWD/node_modules/@earendil-works/$peer" \
+              "$root/source/node_modules/@earendil-works/$peer"
+          done
+          ln -s "$PWD/node_modules/typebox" "$root/source/node_modules/typebox"
           OPENPI_WEB_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             node "$root/source/bin/openpi.js" web "$root/workspace" --port 0 --no-open \
             >"$root/host.log" 2>&1 &
