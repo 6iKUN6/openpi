@@ -195,10 +195,15 @@ export async function waitForBackend({
   while (Date.now() < deadline) {
     const startupFailure = startup.getFailure();
     if (startupFailure) throw startupFailure;
+    const deadlineController = new AbortController();
+    const timeout = setTimeout(
+      () => deadlineController.abort(),
+      Math.max(1, deadline - Date.now()),
+    );
     try {
       const signal = AbortSignal.any([
         startup.signal,
-        AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        deadlineController.signal,
       ]);
       const response = await fetcher(endpoint, {
         headers: { Authorization: `Bearer ${token}` },
@@ -210,6 +215,8 @@ export async function waitForBackend({
       if (failure) throw failure;
       if (Date.now() >= deadline) break;
       // The Pi runtime may take a few seconds to initialize on first start.
+    } finally {
+      clearTimeout(timeout);
     }
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
