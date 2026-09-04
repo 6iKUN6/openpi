@@ -2,8 +2,8 @@
 
 - Status: draft PR (real-provider acceptance pending)
 - Created: 2026-09-03
-- Verified through: 2026-09-04 implementation commit `30346f0e6c579a8a3b6798d0e974945573d446dd`
-- Source boundary: OpenPI PR #384 implementation commit `30346f0e6c579a8a3b6798d0e974945573d446dd`, based on `72fbba5`; frozen behavior and visual reference PR #352 head `1b340f2`
+- Verified through: 2026-09-04 implementation commit `c461d4a641f6cc143fcb554ad9c9da71b218fd98`
+- Source boundary: OpenPI PR #384 implementation commit `c461d4a641f6cc143fcb554ad9c9da71b218fd98`, based on `72fbba5`; frozen behavior and visual reference PR #352 head `1b340f2`
 - Related issue: [#76](https://github.com/tt-a1i/openpi/issues/76)
 - Related PRs: [#384](https://github.com/openpi-dev/openpi/pull/384) implements this design; [#352](https://github.com/openpi-dev/openpi/pull/352) is the frozen behavior and visual reference, not a dependency merged into this branch
 
@@ -113,7 +113,8 @@ Manual acceptance must prove the checkout revision and single OpenPI source befo
 - `bun run check`: passed, including the React TypeScript project and production Web build.
 - Node 26.8.1 Web Vitest run: 27 tests passed across the store and render suites, including the controlled-search whitespace and Markdown soft-break regressions.
 - Node 22.13.1 and Node 24.16.0 development-support runs: 10 tests passed on each runtime, including hanging readiness probes bounded by both the 15-second deadline and backend startup failure.
-- Node 24.16.0 full `bun run test`: 1,231 of 1,232 Node tests passed with one platform-specific skip and no failures or cancellations; all 57 Web Vitest tests passed.
+- Node 24.16.0 full `bun run test` at implementation commit `30346f0e6c579a8a3b6798d0e974945573d446dd`: 1,231 of 1,232 Node tests passed with one platform-specific skip and no failures or cancellations; all 57 Web Vitest tests passed.
+- After the shutdown-handler ordering fix, the installed-CLI signal test passed 20 consecutive Node 24.16.0 runs. A subsequent full run passed the Web CLI and development-support tests but ended with four unrelated load-sensitive Setup and Workflow timeouts before Vitest.
 - Browser smoke: Vite HMR and the built `openpi web` entry both rendered the same React source without console warnings or horizontal overflow at 1,280 by 720 and 390 by 844.
 - Responsive smoke: the narrow-screen sidebar is an opaque 300-pixel drawer with a full-viewport scrim; its close control does not mutate the desktop collapsed preference.
 - `bun run test:web:e2e`: 3 Playwright tests passed against the production WebHost, with zero axe violations at both recorded viewports after correcting the navigation semantics and adding the page heading.
