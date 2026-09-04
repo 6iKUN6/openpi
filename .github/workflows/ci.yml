@@ -67,6 +67,7 @@ jobs:
             --no-extensions \
             --extension "$package/extensions/file-search/index.ts" \
             --extension "$package/extensions/git-info/index.ts" \
+            --extension "$package/extensions/ai-providers/index.ts" \
             </dev/null
       - name: Smoke-test packed Web CLI with locked Pi host
         run: |
