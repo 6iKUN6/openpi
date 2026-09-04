@@ -1,10 +1,10 @@
 # OpenPI Web React migration MVP
 
-- Status: draft
+- Status: draft PR (reliability fixes and real-provider acceptance pending)
 - Created: 2026-09-03
-- Verified through: not yet validated
+- Verified through: 2026-09-04 local working tree on `codex/web-react-mvp`
 - Source boundary: OpenPI `72fbba5`, PR #352 head `1b340f2`
-- Related issue: none; local validation branch only
+- Related issue: [#76](https://github.com/tt-a1i/openpi/issues/76)
 - Related PR: [#352](https://github.com/openpi-dev/openpi/pull/352) is the frozen behavior and visual reference, not a dependency merged into this branch
 
 ## Purpose
@@ -37,7 +37,7 @@ Astryx owns generic Dialog, Menu, Tooltip, and Select behavior where its API pre
 2. An authenticated Fetch-based SSE client parses records, resumes from the last cursor, and requests a snapshot after invalidation or replay gaps.
 3. A Zustand vanilla store reduces snapshots and events into browser projection state. React reads selectors and dispatches commands; it does not infer completion from labels or CSS.
 
-Only browser-local UI state may persist in `sessionStorage`: the process token and collapsed workspace groups. Theme, language, Sessions, models, and runtime capabilities are not independently persisted by this UI.
+Only browser-local UI state may persist in `sessionStorage`: the process token, collapsed workspace groups, and the desktop sidebar preference. Theme, language, Sessions, models, and runtime capabilities are not independently persisted by this UI.
 
 ## Component boundaries
 
@@ -77,7 +77,7 @@ The removed browser-local theme/language settings are deliberately excluded. Lan
 
 ## Build and static delivery
 
-Vite uses `web/ui` as its source root and writes deterministic, auditable assets to `web/dist`. CSS splitting is disabled for the MVP so `WebHost` can retain a fixed static allowlist. No source map or arbitrary filesystem path is served.
+Vite uses `web/ui` as its source root and writes deterministic, auditable assets to `web/dist`. The built directory is committed as a package runtime asset so npm and GitHub installs can start Web without the development toolchain. CI rebuilds it and rejects source/artifact drift. CSS splitting is disabled for the MVP so `WebHost` can retain a fixed static allowlist. No source map or arbitrary filesystem path is served.
 
 - `bun run dev:web` starts the source backend plus Vite HMR.
 - `bun run build:web` creates production assets.
@@ -106,6 +106,20 @@ Automated validation must include:
 
 Manual acceptance must prove the checkout revision and single OpenPI source before exercising a real provider Session. It then covers landing animation, workspace and Session lifecycle, model selection, normal and queued prompts, streaming, tool evidence, Subagent/Workflow projections, reconnect, refresh recovery, narrow-screen navigation, and production static delivery.
 
+### Recorded local validation
+
+- `bun run check`: passed, including the React TypeScript project and production Web build.
+- Latest full `bun run test`: passed with 1,228 Node tests, one platform-specific skip, and 54 Vitest tests. A prior full run exposed a narrow installed-CLI signal-handler registration race that remains to be fixed before review even though the assertion passes in isolation and in the latest run.
+- Web store Vitest run: 21 tests passed for SSE resync, canonical snapshot recovery, cross-tab events, Session activation races, prompt settlement, model epoch isolation, first-Session creation, and navigation preferences.
+- Browser smoke: Vite HMR and the built `openpi web` entry both rendered the same React source without console warnings or horizontal overflow at 1,280 by 720 and 390 by 844.
+- Responsive smoke: the narrow-screen sidebar is an opaque 300-pixel drawer with a full-viewport scrim; its close control does not mutate the desktop collapsed preference.
+- `bun run test:web:e2e`: 3 Playwright tests passed against the production WebHost, with zero axe violations at both recorded viewports after correcting the navigation semantics and adding the page heading.
+- `npm pack`: succeeded with an isolated cache; the package contains `web/dist/index.html`, `web/dist/app.js`, `web/dist/styles.css`, and `web/dist/favicon.svg`.
+- Installed-package resource smoke: the packed CLI started independently and served `/`, `/app.js`, `/styles.css`, and `/favicon.svg` with `200`; no Vite client or remote CDN asset was present.
+- CI now rebuilds and rejects `web/dist` drift, tests the packed CLI, and runs a second source-install smoke from `git archive HEAD`. The archive-only path is intentionally completed by CI after the working tree is committed.
+
+Real-provider prompt streaming, ordinary tool evidence, Subagent/Workflow projections, and forced reconnect recovery remain manual acceptance items. Until those are checked against the runtime provenance above, this design record remains `draft` rather than claiming full validation.
+
 ## Success criteria
 
 - Every visible and interactive behavior in the frozen PR #352 baseline is present or has an explicit failing test.
@@ -116,7 +130,7 @@ Manual acceptance must prove the checkout revision and single OpenPI source befo
 
 ## Non-goals
 
-- Merging or publishing the migration.
+- Expanding the Web runtime or protocol beyond what the migration requires.
 - Adding settings, trust approval, file attachments, interrupt control, transcript search, or other open Web issues.
 - Changing Pi Session storage, provider selection semantics, capability schemas, or command endpoints.
 - Keeping a second legacy UI route.
