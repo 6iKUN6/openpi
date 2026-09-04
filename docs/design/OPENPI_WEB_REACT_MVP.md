@@ -1,11 +1,11 @@
 # OpenPI Web React migration MVP
 
-- Status: draft PR (reliability fixes and real-provider acceptance pending)
+- Status: draft PR (real-provider acceptance pending)
 - Created: 2026-09-03
-- Verified through: 2026-09-04 local working tree on `codex/web-react-mvp`
-- Source boundary: OpenPI `72fbba5`, PR #352 head `1b340f2`
+- Verified through: 2026-09-04 implementation commit `31128f26dce88ef6bfe067f99eb37d4f6bec8943`
+- Source boundary: OpenPI PR #384 implementation commit `31128f26dce88ef6bfe067f99eb37d4f6bec8943`, based on `72fbba5`; frozen behavior and visual reference PR #352 head `1b340f2`
 - Related issue: [#76](https://github.com/tt-a1i/openpi/issues/76)
-- Related PR: [#352](https://github.com/openpi-dev/openpi/pull/352) is the frozen behavior and visual reference, not a dependency merged into this branch
+- Related PRs: [#384](https://github.com/openpi-dev/openpi/pull/384) implements this design; [#352](https://github.com/openpi-dev/openpi/pull/352) is the frozen behavior and visual reference, not a dependency merged into this branch
 
 ## Purpose
 
@@ -111,14 +111,17 @@ Manual acceptance must prove the checkout revision and single OpenPI source befo
 ### Recorded local validation
 
 - `bun run check`: passed, including the React TypeScript project and production Web build.
-- Latest full `bun run test`: passed with 1,229 Node tests, one platform-specific skip, and 54 Vitest tests. A prior full run exposed a narrow installed-CLI signal-handler registration race that remains to be fixed before review even though the assertion passes in isolation and in the latest run.
-- Web store Vitest run: 21 tests passed for SSE resync, canonical snapshot recovery, cross-tab events, Session activation races, prompt settlement, model epoch isolation, first-Session creation, and navigation preferences.
+- Node 26.8.1 Web Vitest run: 27 tests passed across the store and render suites, including the controlled-search whitespace and Markdown soft-break regressions.
+- Node 26.8.1 development-support run: 10 tests passed, including hanging readiness probes bounded by both the 15-second deadline and backend startup failure.
+- Latest full `bun run test` attempt under the default 10-file concurrency completed with 1,218 of 1,232 Node tests passed, one platform-specific skip, and 13 unrelated timing-sensitive Workflow/Web Host failures under load; the runner stops before Vitest after Node failures. A lower-concurrency full run reached 1,230 passed, one skip, and one unchanged Workflow timeout. Focused Web suites pass; this record does not claim a green local full-suite run.
 - Browser smoke: Vite HMR and the built `openpi web` entry both rendered the same React source without console warnings or horizontal overflow at 1,280 by 720 and 390 by 844.
 - Responsive smoke: the narrow-screen sidebar is an opaque 300-pixel drawer with a full-viewport scrim; its close control does not mutate the desktop collapsed preference.
 - `bun run test:web:e2e`: 3 Playwright tests passed against the production WebHost, with zero axe violations at both recorded viewports after correcting the navigation semantics and adding the page heading.
-- `npm pack`: succeeded with an isolated cache; the package contains `web/dist/index.html`, `web/dist/app.js`, `web/dist/styles.css`, and `web/dist/favicon.svg`.
-- Installed-package resource smoke: the packed CLI started independently and served `/`, `/app.js`, `/styles.css`, and `/favicon.svg` with `200`; no Vite client or remote CDN asset was present.
-- CI now rebuilds and rejects `web/dist` drift, tests the packed CLI, and runs a second source-install smoke from `git archive HEAD`. The archive-only path is intentionally completed by CI after the working tree is committed.
+- `npm pack`: succeeded with an isolated cache; the 949.5 kB tarball expands to approximately 3.0 MB and contains `web/dist/index.html`, `web/dist/app.js`, `web/dist/styles.css`, and `web/dist/favicon.svg`.
+- Installed-package resource smoke: the packed CLI started with the lockfile's Pi 0.84.1 host and served `/`, `/app.js`, `/styles.css`, and `/favicon.svg` with `200`; no Vite client or remote CDN asset was present.
+- Committed-source smoke: exact implementation commit `31128f26dce88ef6bfe067f99eb37d4f6bec8943` was extracted with `git archive`; the default `npm install --omit=dev` succeeded without installing Pi peers, and the archived CLI served `/` after the smoke host supplied the lockfile's peers.
+- Bundle notice inventory: all 90 runtime packages in the final production module graph are represented in `THIRD_PARTY_NOTICES.md`, including retained MIT, ISC, BSD-3-Clause, and Lucide/Feather notices.
+- CI rebuilds and rejects `web/dist` drift, covers Node 22.19, 24, and 26, tests the packed CLI against the lockfile's Pi host, and runs a second source-install smoke from `git archive HEAD`.
 
 Real-provider prompt streaming, ordinary tool evidence, Subagent/Workflow projections, and forced reconnect recovery remain manual acceptance items. Until those are checked against the runtime provenance above, this design record remains `draft` rather than claiming full validation.
 
