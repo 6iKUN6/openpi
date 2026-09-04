@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [22.19.0, 24]
+        node-version: [22.19.0, 24, 26]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -68,7 +68,7 @@ jobs:
             --extension "$package/extensions/file-search/index.ts" \
             --extension "$package/extensions/git-info/index.ts" \
             </dev/null
-      - name: Smoke-test packed standalone Web CLI
+      - name: Smoke-test packed Web CLI with locked Pi host
         run: |
           root="$(mktemp -d)"
           server_pid=""
@@ -85,7 +85,16 @@ jobs:
           npm pack --ignore-scripts --silent --pack-destination "$root" >/dev/null
           tarballs=("$root"/*.tgz)
           test "${#tarballs[@]}" -eq 1
-          npm install --prefix "$root/app" --ignore-scripts --no-audit --no-fund "${tarballs[0]}"
+          pi_ai_version="$(node -p 'require("./node_modules/@earendil-works/pi-ai/package.json").version')"
+          pi_agent_version="$(node -p 'require("./node_modules/@earendil-works/pi-coding-agent/package.json").version')"
+          pi_tui_version="$(node -p 'require("./node_modules/@earendil-works/pi-tui/package.json").version')"
+          typebox_version="$(node -p 'require("./node_modules/typebox/package.json").version')"
+          npm install --prefix "$root/app" --ignore-scripts --no-audit --no-fund \
+            "@earendil-works/pi-ai@$pi_ai_version" \
+            "@earendil-works/pi-coding-agent@$pi_agent_version" \
+            "@earendil-works/pi-tui@$pi_tui_version" \
+            "typebox@$typebox_version" \
+            "${tarballs[0]}"
           OPENPI_WEB_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             "$root/app/node_modules/.bin/openpi" web "$root/workspace" --port 0 --no-open \
             >"$root/host.log" 2>&1 &

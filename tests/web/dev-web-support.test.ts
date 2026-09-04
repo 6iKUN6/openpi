@@ -5,6 +5,7 @@ import {
   parseDevelopmentPort,
   resolveDevelopmentPorts,
   selectDevelopmentPort,
+  waitForBackend,
 } from "../../scripts/dev-web-support.ts";
 
 test("development ports keep an available default", async () => {
@@ -123,4 +124,60 @@ test("backend startup monitor reports a split failure without waiting", async ()
   const failure = await monitor.waitForFailure();
   assert.match(failure.message, /already owned by live PID 52690/u);
   assert.ok(Buffer.byteLength(monitor.getTail(), "utf8") <= 96);
+});
+
+test("backend readiness aborts a hanging probe at the advertised deadline", {
+  timeout: 250,
+}, async () => {
+  const monitor = createBackendStartupMonitor();
+  const probeSignals: AbortSignal[] = [];
+
+  await assert.rejects(
+    waitForBackend({
+      backendOrigin: "http://127.0.0.1:57107",
+      token: "test-token",
+      startup: monitor,
+      timeoutMs: 20,
+      retryDelayMs: 1,
+      fetcher: (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          if (!init?.signal) return;
+          probeSignals.push(init.signal);
+          init.signal.addEventListener("abort", () => reject(init.signal), {
+            once: true,
+          });
+        }),
+    }),
+    /Web backend did not become ready/u,
+  );
+
+  assert.equal(probeSignals.length, 1);
+  assert.equal(probeSignals[0]?.aborted, true);
+});
+
+test("backend readiness aborts a hanging probe when startup fails", {
+  timeout: 250,
+}, async () => {
+  const monitor = createBackendStartupMonitor();
+  const probeSignals: AbortSignal[] = [];
+  const waiting = waitForBackend({
+    backendOrigin: "http://127.0.0.1:57107",
+    token: "test-token",
+    startup: monitor,
+    timeoutMs: 1_000,
+    fetcher: (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        if (!init?.signal) return;
+        probeSignals.push(init.signal);
+        init.signal.addEventListener("abort", () => reject(init.signal), {
+          once: true,
+        });
+      }),
+  });
+
+  monitor.fail(new Error("backend exited during readiness"));
+
+  await assert.rejects(waiting, /backend exited during readiness/u);
+  assert.equal(probeSignals.length, 1);
+  assert.equal(probeSignals[0]?.aborted, true);
 });

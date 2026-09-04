@@ -18,13 +18,13 @@ function readToken() {
   );
   if (fragmentToken) {
     try {
-      sessionStorage.setItem(tokenStorageKey, fragmentToken);
+      window.sessionStorage.setItem(tokenStorageKey, fragmentToken);
     } catch {}
     history.replaceState(null, "", `${location.pathname}${location.search}`);
     return fragmentToken;
   }
   try {
-    return sessionStorage.getItem(tokenStorageKey);
+    return window.sessionStorage.getItem(tokenStorageKey);
   } catch {
     return null;
   }

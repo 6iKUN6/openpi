@@ -216,8 +216,8 @@ function eventStreamHarness() {
 }
 
 afterEach(() => {
-  sessionStorage.clear();
-  localStorage.clear();
+  window.sessionStorage.clear();
+  window.localStorage?.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -754,10 +754,24 @@ describe("OpenPI Web store", () => {
     store.getState().actions.toggleSidebar(false);
 
     expect(
-      JSON.parse(sessionStorage.getItem("openpi.collapsed-workspaces") || "[]"),
+      JSON.parse(
+        window.sessionStorage.getItem("openpi.collapsed-workspaces") || "[]",
+      ),
     ).toEqual(["/tmp/ws"]);
-    expect(sessionStorage.getItem("openpi.sidebar-collapsed")).toBe("true");
-    expect(localStorage.length).toBe(0);
+    expect(window.sessionStorage.getItem("openpi.sidebar-collapsed")).toBe(
+      "true",
+    );
+    expect(window.localStorage?.length ?? 0).toBe(0);
+  });
+
+  it("preserves spaces in the controlled Session search query", () => {
+    const store = createWebStore(new FakeClient());
+
+    store.getState().actions.setQuery("foo ");
+    expect(store.getState().query).toBe("foo ");
+
+    store.getState().actions.setQuery(`${store.getState().query}bar`);
+    expect(store.getState().query).toBe("foo bar");
   });
 
   it("keeps mobile drawer state separate from the desktop preference", () => {

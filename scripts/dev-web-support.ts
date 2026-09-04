@@ -2,6 +2,7 @@ import { createServer } from "node:net";
 
 export const DEVELOPMENT_PORT_SEARCH_LIMIT = 100;
 export const DEVELOPMENT_STARTUP_ERROR_MAX_BYTES = 8 * 1024;
+export const DEVELOPMENT_BACKEND_READY_TIMEOUT_MS = 15_000;
 
 type PortProbe = (port: number) => Promise<boolean>;
 
@@ -137,6 +138,7 @@ export function createBackendStartupMonitor(
 ) {
   let tail = "";
   let failure: Error | undefined;
+  const failureController = new AbortController();
   let resolveFailure!: (error: Error) => void;
   const failureSignal = new Promise<Error>((resolve) => {
     resolveFailure = resolve;
@@ -145,6 +147,7 @@ export function createBackendStartupMonitor(
   const fail = (error: unknown) => {
     if (failure) return;
     failure = error instanceof Error ? error : new Error(String(error));
+    failureController.abort(failure);
     resolveFailure(failure);
   };
 
@@ -160,6 +163,7 @@ export function createBackendStartupMonitor(
     getFailure() {
       return failure;
     },
+    signal: failureController.signal,
     waitForFailure() {
       return failureSignal;
     },
@@ -167,4 +171,58 @@ export function createBackendStartupMonitor(
       return tail;
     },
   };
+}
+
+interface WaitForBackendOptions {
+  backendOrigin: string;
+  token: string;
+  startup: ReturnType<typeof createBackendStartupMonitor>;
+  fetcher?: typeof fetch;
+  timeoutMs?: number;
+  retryDelayMs?: number;
+}
+
+export async function waitForBackend({
+  backendOrigin,
+  token,
+  startup,
+  fetcher = fetch,
+  timeoutMs = DEVELOPMENT_BACKEND_READY_TIMEOUT_MS,
+  retryDelayMs = 100,
+}: WaitForBackendOptions) {
+  const endpoint = `${backendOrigin}/api/snapshot`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const startupFailure = startup.getFailure();
+    if (startupFailure) throw startupFailure;
+    try {
+      const signal = AbortSignal.any([
+        startup.signal,
+        AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      ]);
+      const response = await fetcher(endpoint, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal,
+      });
+      if (response.ok) return;
+    } catch {
+      const failure = startup.getFailure();
+      if (failure) throw failure;
+      if (Date.now() >= deadline) break;
+      // The Pi runtime may take a few seconds to initialize on first start.
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    const failure = await Promise.race([
+      new Promise<undefined>((resolve) =>
+        setTimeout(
+          () => resolve(undefined),
+          Math.min(retryDelayMs, remainingMs),
+        ),
+      ),
+      startup.waitForFailure(),
+    ]);
+    if (failure) throw failure;
+  }
+  throw new Error(`Web backend did not become ready at ${endpoint}`);
 }

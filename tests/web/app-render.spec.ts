@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { WebSnapshot } from "../../web/protocol/types.ts";
 import { Markdown } from "../../web/ui/src/components/Markdown.tsx";
 import { OpenPiLogo } from "../../web/ui/src/components/OpenPiLogo.tsx";
+import { SessionSidebar } from "../../web/ui/src/features/sessions/SessionSidebar.tsx";
 import { Transcript } from "../../web/ui/src/features/transcript/Transcript.tsx";
 import { i18n } from "../../web/ui/src/i18n.ts";
+import { createWebStore } from "../../web/ui/src/store/web-store.ts";
 
 afterEach(cleanup);
 
@@ -44,6 +46,56 @@ describe("OpenPI React transcript", () => {
       "https://example.com/a.png",
     );
     expect(screen.getByText("bad").closest("a")).toBeNull();
+  });
+
+  it("preserves soft line breaks from the frozen Web baseline", () => {
+    const { container } = render(
+      createElement(Markdown, null, "first line\nsecond line"),
+    );
+
+    expect(container.querySelector("br")).toBeTruthy();
+  });
+
+  it("matches Session searches after preserving a trailing input space", () => {
+    const store = createWebStore();
+    store.getState().actions.setQuery("foo ");
+    const snapshot: WebSnapshot = {
+      protocolVersion: 1,
+      generatedAt: "2026-09-01T10:00:00Z",
+      cursor: 1,
+      workspaces: [{ path: "/tmp/ws", name: "ws", current: true }],
+      sessions: [
+        {
+          id: "session-1",
+          path: "/tmp/ws/session.jsonl",
+          cwd: "/tmp/ws",
+          name: "foo bar",
+          modified: "2026-09-01T10:00:00Z",
+          created: "2026-09-01T10:00:00Z",
+          messageCount: 1,
+          firstMessage: "hello",
+        },
+      ],
+      models: [],
+      runtime: { status: "idle", capabilities: {} },
+      truncation,
+    };
+
+    renderWithI18n(
+      createElement(SessionSidebar, {
+        snapshot,
+        selectedPath: null,
+        selectedWorkspace: "/tmp/ws",
+        collapsed: new Set<string>(),
+        query: store.getState().query,
+        searchOpen: true,
+        mobileOpen: false,
+        actions: store.getState().actions,
+      }),
+    );
+
+    expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe("foo ");
+    expect(screen.getByText("foo bar")).toBeTruthy();
   });
 
   it("keeps the 16-cell logo animation replayable", () => {

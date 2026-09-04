@@ -80,7 +80,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
   }, [editTarget]);
 
   const grouped = useMemo(() => {
-    const query = props.query.toLowerCase();
+    const query = props.query.trim().toLowerCase();
     const visible = (workspacePath?: string) =>
       (snapshot?.sessions ?? []).filter(
         (session) =>
@@ -340,7 +340,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
 
       <Dialog
         isOpen={Boolean(editTarget)}
-        onOpenChange={(open) => !open && setEditTarget(null)}
+        onOpenChange={(open: boolean) => !open && setEditTarget(null)}
         purpose="form"
         width={400}
         aria-label={
@@ -385,7 +385,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
 
       <Dialog
         isOpen={Boolean(deleteTarget)}
-        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        onOpenChange={(open: boolean) => !open && setDeleteTarget(null)}
         purpose="form"
         width={440}
         aria-label={t("deleteWorkspace")}

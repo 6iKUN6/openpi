@@ -32,7 +32,9 @@ const refreshEventTypes = new Set([
 
 function readStringSet(key: string) {
   try {
-    const value: unknown = JSON.parse(sessionStorage.getItem(key) || "[]");
+    const value: unknown = JSON.parse(
+      window.sessionStorage.getItem(key) || "[]",
+    );
     return new Set(
       Array.isArray(value)
         ? value.filter((item): item is string => typeof item === "string")
@@ -45,7 +47,7 @@ function readStringSet(key: string) {
 
 function readBoolean(key: string) {
   try {
-    return sessionStorage.getItem(key) === "true";
+    return window.sessionStorage.getItem(key) === "true";
   } catch {
     return false;
   }
@@ -53,7 +55,7 @@ function readBoolean(key: string) {
 
 function persist(key: string, value: unknown) {
   try {
-    sessionStorage.setItem(key, JSON.stringify(value));
+    window.sessionStorage.setItem(key, JSON.stringify(value));
   } catch {}
 }
 
@@ -715,7 +717,7 @@ export function createWebStore(
         }
       },
       setQuery(query) {
-        set({ query: query.trim() });
+        set({ query });
       },
       setSearchOpen(open) {
         set({ searchOpen: open, ...(open ? {} : { query: "" }) });
@@ -734,7 +736,7 @@ export function createWebStore(
         }
         const sidebarCollapsed = !get().sidebarCollapsed;
         try {
-          sessionStorage.setItem(
+          window.sessionStorage.setItem(
             sidebarCollapsedStorageKey,
             String(sidebarCollapsed),
           );

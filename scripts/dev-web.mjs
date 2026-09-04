@@ -6,35 +6,13 @@ import { openBrowser } from "../web/host/browser-launcher.ts";
 import {
   createBackendStartupMonitor,
   resolveDevelopmentPorts,
+  waitForBackend,
 } from "./dev-web-support.ts";
 
 const workspace = process.argv[2] ?? process.cwd();
 const viteConfig = fileURLToPath(
   new URL("../web/vite.config.mjs", import.meta.url),
 );
-
-async function waitForBackend({ backendOrigin, token, startup }) {
-  const endpoint = `${backendOrigin}/api/snapshot`;
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    const startupFailure = startup.getFailure();
-    if (startupFailure) throw startupFailure;
-    try {
-      const response = await fetch(endpoint, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (response.ok) return;
-    } catch {
-      // The Pi runtime may take a few seconds to initialize on first start.
-    }
-    const failure = await Promise.race([
-      new Promise((resolve) => setTimeout(() => resolve(undefined), 100)),
-      startup.waitForFailure(),
-    ]);
-    if (failure) throw failure;
-  }
-  throw new Error(`Web backend did not become ready at ${endpoint}`);
-}
 
 let ui;
 let backend;
