@@ -79,6 +79,8 @@ The removed browser-local theme/language settings are deliberately excluded. Lan
 
 Vite uses `web/ui` as its source root and writes deterministic, auditable assets to `web/dist`. The built directory is committed as a package runtime asset so npm and GitHub installs can start Web without the development toolchain. CI rebuilds it and rejects source/artifact drift. CSS splitting is disabled for the MVP so `WebHost` can retain a fixed static allowlist. No source map or arbitrary filesystem path is served.
 
+Git package installs inherit the repository `.npmrc` and disable npm peer dependency resolution. Pi provides the declared host peers, and this also avoids an npm 10 Arborist crash while `npm install --omit=dev` resolves omitted development peer graphs. The committed-source smoke deliberately keeps Pi's default Git install command unchanged so it validates this real path.
+
 - `bun run dev:web` starts the source backend plus Vite HMR.
 - `bun run build:web` creates production assets.
 - `node ./bin/openpi.js web [workspace]` serves those assets without Vite.
@@ -109,7 +111,7 @@ Manual acceptance must prove the checkout revision and single OpenPI source befo
 ### Recorded local validation
 
 - `bun run check`: passed, including the React TypeScript project and production Web build.
-- Latest full `bun run test`: passed with 1,228 Node tests, one platform-specific skip, and 54 Vitest tests. A prior full run exposed a narrow installed-CLI signal-handler registration race that remains to be fixed before review even though the assertion passes in isolation and in the latest run.
+- Latest full `bun run test`: passed with 1,229 Node tests, one platform-specific skip, and 54 Vitest tests. A prior full run exposed a narrow installed-CLI signal-handler registration race that remains to be fixed before review even though the assertion passes in isolation and in the latest run.
 - Web store Vitest run: 21 tests passed for SSE resync, canonical snapshot recovery, cross-tab events, Session activation races, prompt settlement, model epoch isolation, first-Session creation, and navigation preferences.
 - Browser smoke: Vite HMR and the built `openpi web` entry both rendered the same React source without console warnings or horizontal overflow at 1,280 by 720 and 390 by 844.
 - Responsive smoke: the narrow-screen sidebar is an opaque 300-pixel drawer with a full-viewport scrim; its close control does not mutate the desktop collapsed preference.
