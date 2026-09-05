@@ -464,6 +464,112 @@ describe("OpenPI Web store", () => {
     store.getState().actions.stop();
   });
 
+  it("keeps a running turn running when a follow-up prompt is accepted", async () => {
+    const client = new FakeClient();
+    client.snapshots.push(Promise.resolve(snapshot()));
+    const stream = eventStreamHarness();
+    const store = createWebStore(client, {
+      consumeEvents: stream.consumeEvents,
+    });
+    await store.getState().actions.refreshSnapshot();
+    store.getState().actions.start();
+
+    stream.emit(
+      runtimeEvent(5, "agent_start", {
+        sessionId: "session-1",
+      }),
+    );
+    expect(store.getState().liveRunning).toBe(true);
+    expect(store.getState().livePhase).toBe("running");
+
+    stream.emit(
+      runtimeEvent(6, "prompt_accepted", {
+        commandId: "prompt-follow-up",
+        sessionId: "session-1",
+      }),
+    );
+    expect(store.getState().liveRunning).toBe(true);
+    expect(store.getState().livePhase).toBe("running");
+    store.getState().actions.stop();
+  });
+
+  it("keeps a running turn running when a follow-up HTTP receipt arrives", async () => {
+    const client = new FakeClient();
+    client.snapshots.push(Promise.resolve(snapshot()));
+    const stream = eventStreamHarness();
+    const admission = deferred<CommandReceipt>();
+    client.promptResult = admission.promise;
+    const store = createWebStore(client, {
+      consumeEvents: stream.consumeEvents,
+    });
+    await store.getState().actions.refreshSnapshot();
+    store.getState().actions.start();
+
+    stream.emit(
+      runtimeEvent(5, "agent_start", {
+        sessionId: "session-1",
+      }),
+    );
+    const sending = store.getState().actions.sendPrompt("queued follow-up");
+    admission.resolve({ id: "prompt-follow-up", accepted: true });
+    expect(await sending).toBe(true);
+    expect(store.getState().liveRunning).toBe(true);
+    expect(store.getState().livePhase).toBe("running");
+    store.getState().actions.stop();
+  });
+
+  it("idles a settled HTTP receipt without restarting the live turn", async () => {
+    const client = new FakeClient();
+    client.snapshots.push(Promise.resolve(snapshot()));
+    const stream = eventStreamHarness();
+    const admission = deferred<CommandReceipt>();
+    client.promptResult = admission.promise;
+    const store = createWebStore(client, {
+      consumeEvents: stream.consumeEvents,
+    });
+    await store.getState().actions.refreshSnapshot();
+    store.getState().actions.start();
+
+    stream.emit(
+      runtimeEvent(5, "prompt_settled", {
+        commandId: "prompt-already-done",
+        sessionId: "session-1",
+      }),
+    );
+    const sending = store.getState().actions.sendPrompt("already settled");
+    admission.resolve({ id: "prompt-already-done", accepted: true });
+    expect(await sending).toBe(true);
+    expect(store.getState().liveRunning).toBe(false);
+    expect(store.getState().livePhase).toBe("idle");
+    store.getState().actions.stop();
+  });
+
+  it("ignores prompt_accepted owned by another Session while the current turn is running", async () => {
+    const client = new FakeClient();
+    client.snapshots.push(Promise.resolve(snapshot()));
+    const stream = eventStreamHarness();
+    const store = createWebStore(client, {
+      consumeEvents: stream.consumeEvents,
+    });
+    await store.getState().actions.refreshSnapshot();
+    store.getState().actions.start();
+
+    stream.emit(
+      runtimeEvent(5, "agent_start", {
+        sessionId: "session-1",
+      }),
+    );
+    stream.emit(
+      runtimeEvent(6, "prompt_accepted", {
+        commandId: "prompt-other",
+        sessionId: "session-other",
+      }),
+    );
+    expect(store.getState().liveRunning).toBe(true);
+    expect(store.getState().livePhase).toBe("running");
+    store.getState().actions.stop();
+  });
+
   it("refreshes Session metadata events emitted by another browser tab", async () => {
     vi.useFakeTimers();
     const client = new FakeClient();
@@ -577,6 +683,41 @@ describe("OpenPI Web store", () => {
     expect(store.getState().liveMessages).toEqual([]);
     expect(store.getState().liveRunning).toBe(false);
     expect(store.getState().promptAdmissionPending).toBe(false);
+  });
+
+  it("does not let a stale receipt downgrade a newer Session epoch that is already running", async () => {
+    const client = new FakeClient();
+    client.snapshots.push(
+      Promise.resolve(snapshot()),
+      Promise.resolve(activeSnapshot("session-2", "/tmp/ws/b.jsonl")),
+    );
+    const prompt = deferred<CommandReceipt>();
+    client.promptResult = prompt.promise;
+    client.selectionResults.push(Promise.resolve({}));
+    const stream = eventStreamHarness();
+    const store = createWebStore(client, {
+      consumeEvents: stream.consumeEvents,
+    });
+    await store.getState().actions.refreshSnapshot();
+    store.getState().actions.start();
+
+    const sending = store.getState().actions.sendPrompt("message for A");
+    await store.getState().actions.selectSession("/tmp/ws/b.jsonl");
+    stream.emit(
+      runtimeEvent(5, "agent_start", {
+        sessionId: "session-2",
+      }),
+    );
+    expect(store.getState().liveRunning).toBe(true);
+    expect(store.getState().livePhase).toBe("running");
+    prompt.resolve({ id: "prompt-a", accepted: true });
+
+    expect(await sending).toBe(false);
+    expect(store.getState().selectedPath).toBe("/tmp/ws/b.jsonl");
+    expect(store.getState().liveRunning).toBe(true);
+    expect(store.getState().livePhase).toBe("running");
+    expect(store.getState().promptAdmissionPending).toBe(false);
+    store.getState().actions.stop();
   });
 
   it("orders Session creation before a newer selection intent", async () => {

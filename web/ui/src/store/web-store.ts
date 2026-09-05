@@ -175,6 +175,18 @@ export function createWebStore(
     thinkingDurations: {},
   });
 
+  const promptAcceptedLivePatch = (
+    settled: boolean,
+    currentPhase: WebStoreState["livePhase"],
+  ) => ({
+    liveRunning: !settled,
+    livePhase: settled
+      ? ("idle" as const)
+      : currentPhase === "running"
+        ? ("running" as const)
+        : ("preparing" as const),
+  });
+
   const store = createStore<WebStoreState>((set, get) => {
     const showError = (error: unknown) => {
       set({
@@ -285,8 +297,7 @@ export function createWebStore(
       } else if (event.type === "prompt_accepted") {
         const settled = terminalPromptIds.has(String(detail.commandId ?? ""));
         set({
-          liveRunning: !settled,
-          livePhase: settled ? "idle" : "preparing",
+          ...promptAcceptedLivePatch(settled, current.livePhase),
           liveRetry: null,
         });
       } else if (event.type === "agent_start") {
@@ -690,10 +701,7 @@ export function createWebStore(
           if (epoch !== sessionEpoch || promptAdmissionToken !== admission)
             return false;
           const settled = terminalPromptIds.has(receipt.id);
-          set({
-            livePhase: settled ? "idle" : "preparing",
-            liveRunning: !settled,
-          });
+          set(promptAcceptedLivePatch(settled, get().livePhase));
           scheduleSnapshotRefresh(120);
           return true;
         } catch (error) {
