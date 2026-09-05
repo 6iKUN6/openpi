@@ -19,8 +19,10 @@ const execFileAsync = promisify(execFile);
 const entrypoint = new URL("../../bin/openpi.js", import.meta.url);
 const entrypointPath = fileURLToPath(entrypoint);
 test("openpi is an executable standalone Web entrypoint", async () => {
-  const info = await stat(entrypoint);
-  assert.notEqual(info.mode & 0o100, 0);
+  if (process.platform !== "win32") {
+    const info = await stat(entrypoint);
+    assert.notEqual(info.mode & 0o100, 0);
+  }
 
   const { stdout } = await execFileAsync(process.execPath, [
     entrypointPath,
@@ -159,59 +161,61 @@ export class PiWebRuntime {
     );
     assert.equal(await readFile(disposeMarker, "utf8"), "disposed");
 
-    const child = spawn(
-      process.execPath,
-      [
-        join(packageRoot, "bin", "openpi.js"),
-        "web",
-        temporaryRoot,
-        "--no-open",
-      ],
-      {
-        env: {
-          ...process.env,
-          OPENPI_CLI_KEEPALIVE: "1",
-          OPENPI_CLI_STOP_FAIL: "1",
+    if (process.platform !== "win32") {
+      const child = spawn(
+        process.execPath,
+        [
+          join(packageRoot, "bin", "openpi.js"),
+          "web",
+          temporaryRoot,
+          "--no-open",
+        ],
+        {
+          env: {
+            ...process.env,
+            OPENPI_CLI_KEEPALIVE: "1",
+            OPENPI_CLI_STOP_FAIL: "1",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
         },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    let signalOutput = "";
-    let signalError = "";
-    child.stdout.on("data", (chunk) => {
-      signalOutput += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      signalError += chunk;
-    });
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(
-        () => reject(new Error("installed CLI did not start")),
-        5_000,
       );
-      const waitForReady = () => {
-        if (
-          signalOutput.includes(
-            "OpenPI Web Workbench is running at http://127.0.0.1:12345",
-          )
-        ) {
-          clearTimeout(timeout);
-          resolve();
-          return;
-        }
-        setTimeout(waitForReady, 10);
-      };
-      waitForReady();
-    });
-    child.kill("SIGTERM");
-    const [exitCode] = (await once(child, "close")) as [number | null];
-    assert.equal(exitCode, 1);
-    assert.match(
-      signalError,
-      /Failed to stop OpenPI Web Workbench: stop failed/u,
-    );
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      let signalOutput = "";
+      let signalError = "";
+      child.stdout.on("data", (chunk) => {
+        signalOutput += chunk;
+      });
+      child.stderr.on("data", (chunk) => {
+        signalError += chunk;
+      });
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error("installed CLI did not start")),
+          5_000,
+        );
+        const waitForReady = () => {
+          if (
+            signalOutput.includes(
+              "OpenPI Web Workbench is running at http://127.0.0.1:12345",
+            )
+          ) {
+            clearTimeout(timeout);
+            resolve();
+            return;
+          }
+          setTimeout(waitForReady, 10);
+        };
+        waitForReady();
+      });
+      child.kill("SIGTERM");
+      const [exitCode] = (await once(child, "close")) as [number | null];
+      assert.equal(exitCode, 1);
+      assert.match(
+        signalError,
+        /Failed to stop OpenPI Web Workbench: stop failed/u,
+      );
+    }
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
