@@ -435,6 +435,8 @@ macOS/Linux arm64 与 x64 缺少二进制时，OpenPI 会从官方 Release 下�
 
 ### 一个配置入口
 
+个人配置 `my-pi-setup.json` 使用 `configVersion: 1`。无参数 `/openpi-setup` 展示配置来源、版本、字段诊断与是否允许写入。缺文件时仅使用默认值；旧格式仅在明确保存时迁移；JSON 损坏、读取失败、不支持的版本及非法已知字段会阻止覆盖，并保留原文件。未知字段会警告并保留；会丢失未知字段的修改被拒绝。有 UI 的 Session 启动或扩展重载时，加载错误会主动提示正在使用安全默认值且写入已阻止；旧格式或未知字段会给出简短警告，引导到 `/openpi-setup` 查看详情，不触发模型调用或自动改写文件。缺文件和合法的当前版本配置不告警。当前 Session 应用失败时尝试恢复旧文件和配置；若文件已被外部修改或恢复失败，则报告恢复不完整。诊断不展示字段原值或 post-edit 命令。修复文件或明确移除文件后才能恢复配置写入，入口仍为 `/openpi-setup`。
+
 ```text
 /openpi-setup
 /my-pi-setup  # legacy alias
@@ -458,7 +460,7 @@ macOS/Linux arm64 与 x64 缺少二进制时，OpenPI 会从官方 Release 下�
 /openpi-setup 给 explorer 指定模型，让 reviewer 继承父模型
 ```
 
-配置保存在 `~/.pi/agent/my-pi-setup.json`，与包代码分离，升级不会覆盖。
+配置保存在 `~/.pi/agent/my-pi-setup.json`，与包代码分离，升级不会覆盖。`compact` 预设对应 `plain` 样式及默认单行布局，与默认底栏相同；保存回执会区分“已保存”和“有效配置有变化”，只列出实际变化的字段。保持默认且未调用写入工具时不会创建文件。
 
 Footer 布局以 `footerLines` 作为唯一持久化格式。旧版 `footerItems` 会在读取时迁移，但迁移后的配置不保证能被旧版 OpenPI 正确解释，因此不承诺配置文件的降级兼容性。
 
