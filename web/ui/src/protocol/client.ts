@@ -4,6 +4,12 @@ import type {
   WebSubagentDetail,
 } from "../../../../extensions/shared/web-observer-registry.ts";
 import {
+  isWebControllerId,
+  type WebQuestionRequest,
+  type WebQuestionAnswers,
+  type WebQuestionReceipt,
+} from "../../../protocol/questions.ts";
+import {
   ARTIFACT_MAX_BYTES,
   type ArtifactMetadata,
   type ArtifactPreview,
@@ -27,6 +33,22 @@ import type { WebProjectTrustStatus } from "../../../runtime/trust-status.ts";
 import type { WebProviderAuthProjection } from "../../../runtime/types.ts";
 
 const tokenStorageKey = "openpi.web.token";
+const controllerStorageKey = "openpi.web.controller";
+let memoryControllerId: string | undefined;
+
+function readControllerId() {
+  try {
+    const existing = window.sessionStorage.getItem(controllerStorageKey);
+    if (isWebControllerId(existing)) return existing;
+    const id = window.crypto.randomUUID();
+    window.sessionStorage.setItem(controllerStorageKey, id);
+    return id;
+  } catch {
+    // Storage-disabled tabs can still answer until a reload; never share a
+    // fixed fallback identity between browsers or instances in this page.
+    return (memoryControllerId ??= window.crypto.randomUUID());
+  }
+}
 
 export class WebApiError extends Error {
   constructor(
@@ -89,10 +111,12 @@ export interface WorkspaceSelectionResult {
 
 export class WebClient {
   readonly token = readToken();
+  readonly controllerId = readControllerId();
 
   headers(json = false) {
     return {
       Authorization: `Bearer ${this.token ?? ""}`,
+      "X-OpenPI-Web-Controller": this.controllerId,
       ...(json ? { "Content-Type": "application/json" } : {}),
     };
   }
@@ -459,6 +483,17 @@ export class WebClient {
     );
   }
 
+  setPlanMode(
+    sessionId: string,
+    enabled: boolean,
+    expectedRevision: string | null,
+  ) {
+    return this.request<{ sessionId: string }>("/api/plan", {
+      method: "POST",
+      body: JSON.stringify({ sessionId, enabled, expectedRevision }),
+    });
+  }
+
   trust(sessionId: string, signal: AbortSignal) {
     return this.request<WebProjectTrustStatus>(
       `/api/trust?sessionId=${encodeURIComponent(sessionId)}`,
@@ -547,6 +582,36 @@ export class WebClient {
     );
   }
 
+  pendingQuestions(sessionId: string, signal?: AbortSignal) {
+    return this.request<{ pending: WebQuestionRequest | null }>(
+      `/api/questions/pending?sessionId=${encodeURIComponent(sessionId)}`,
+      { signal },
+    );
+  }
+
+  async answerQuestions(
+    request: WebQuestionRequest,
+    answers: WebQuestionAnswers | null,
+    signal?: AbortSignal,
+  ) {
+    try {
+      return await this.request<WebQuestionReceipt>("/api/questions/answer", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionId: request.sessionId,
+          requestId: request.requestId,
+          action: answers === null ? "dismiss" : "answer",
+          ...(answers === null ? {} : { answers }),
+        }),
+        signal,
+      });
+    } catch (error) {
+      if (error instanceof WebApiError && error.code === "STALE_QUESTION")
+        return { state: "stale" } as const;
+      throw error;
+    }
+  }
+
   async prompt(
     sessionId: string,
     content: string,
@@ -556,7 +621,14 @@ export class WebClient {
   ) {
     const receipt = await this.request<CommandReceipt>("/api/prompt", {
       method: "POST",
-      body: JSON.stringify({ sessionId, content, commandId, retry, images }),
+      body: JSON.stringify({
+        sessionId,
+        content,
+        commandId,
+        retry,
+        images,
+        controllerId: this.controllerId,
+      }),
       timeoutMs: 30_000,
       timeoutMessage:
         "Request timed out; admission may still be pending. Retry the same message to recover its receipt.",
