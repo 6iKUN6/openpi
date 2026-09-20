@@ -107,12 +107,46 @@ for (const theme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme: theme });
       if (theme === "dark")
         await page.setViewportSize({ width: 390, height: 844 });
-      await startQuestions(page, workspace);
+      const sessionId = await startQuestions(page, workspace);
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       expect(provider.requests.length).toBe(1);
       expect(JSON.stringify(provider.requests[0]!.body)).toContain(
         '"ask_user"',
       );
+      const originalController = await page.evaluate(() =>
+        sessionStorage.getItem("openpi.web.controller"),
+      );
+      const popupPromise = page.waitForEvent("popup");
+      await page.evaluate(() => window.open("/", "_blank"));
+      const popup = await popupPromise;
+      await expect(
+        popup.getByRole("textbox", { name: "描述任务" }),
+      ).toBeVisible();
+      await expect
+        .poll(() =>
+          popup.evaluate(() => sessionStorage.getItem("openpi.web.controller")),
+        )
+        .not.toBe(originalController);
+      await expect(popup.locator(".question-card")).toHaveCount(0);
+      const originalPending = await page.request.get(
+        `/api/questions/pending?sessionId=${sessionId}`,
+        {
+          headers: {
+            ...headers,
+            "X-OpenPI-Web-Controller": originalController!,
+          },
+        },
+      );
+      const { pending } = await originalPending.json();
+      const popupController = await popup.evaluate(() =>
+        sessionStorage.getItem("openpi.web.controller"),
+      );
+      const forbidden = await popup.request.post("/api/questions/answer", {
+        headers: { ...headers, "X-OpenPI-Web-Controller": popupController! },
+        data: { sessionId, requestId: pending.requestId, action: "dismiss" },
+      });
+      expect(forbidden.status()).toBe(403);
+      await popup.close();
       const other = await context.newPage();
       await other.goto("/");
       await expect(

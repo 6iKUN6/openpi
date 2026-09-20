@@ -4,7 +4,6 @@ import type {
   WebSubagentDetail,
 } from "../../../../extensions/shared/web-observer-registry.ts";
 import {
-  isWebControllerId,
   type WebQuestionRequest,
   type WebQuestionAnswers,
   type WebQuestionReceipt,
@@ -33,22 +32,7 @@ import type { WebProjectTrustStatus } from "../../../runtime/trust-status.ts";
 import type { WebProviderAuthProjection } from "../../../runtime/types.ts";
 
 const tokenStorageKey = "openpi.web.token";
-const controllerStorageKey = "openpi.web.controller";
-let memoryControllerId: string | undefined;
-
-function readControllerId() {
-  try {
-    const existing = window.sessionStorage.getItem(controllerStorageKey);
-    if (isWebControllerId(existing)) return existing;
-    const id = window.crypto.randomUUID();
-    window.sessionStorage.setItem(controllerStorageKey, id);
-    return id;
-  } catch {
-    // Storage-disabled tabs can still answer until a reload; never share a
-    // fixed fallback identity between browsers or instances in this page.
-    return (memoryControllerId ??= window.crypto.randomUUID());
-  }
-}
+import { controllerIdentity } from "./controller.ts";
 
 export class WebApiError extends Error {
   constructor(
@@ -111,12 +95,10 @@ export interface WorkspaceSelectionResult {
 
 export class WebClient {
   readonly token = readToken();
-  readonly controllerId = readControllerId();
-
-  headers(json = false) {
+  async headers(json = false) {
     return {
       Authorization: `Bearer ${this.token ?? ""}`,
-      "X-OpenPI-Web-Controller": this.controllerId,
+      "X-OpenPI-Web-Controller": await controllerIdentity(),
       ...(json ? { "Content-Type": "application/json" } : {}),
     };
   }
@@ -143,7 +125,10 @@ export class WebClient {
       const response = await fetch(path, {
         ...requestOptions,
         signal: controller.signal,
-        headers: { ...this.headers(Boolean(options.body)), ...options.headers },
+        headers: {
+          ...(await this.headers(Boolean(options.body))),
+          ...options.headers,
+        },
       });
       const body = (await response.json()) as {
         error?: string;
@@ -226,7 +211,7 @@ export class WebClient {
     try {
       const response = await fetch(
         `/api/artifacts/content?${new URLSearchParams({ sessionId: artifact.sessionId, handle: artifact.handle, revision: artifact.revision, download: "1" })}`,
-        { headers: this.headers(), signal: controller.signal },
+        { headers: await this.headers(), signal: controller.signal },
       );
       if (!response.ok) {
         const body = (await response.json()) as {
@@ -304,7 +289,7 @@ export class WebClient {
   async browserFrame(sessionId: string, signal?: AbortSignal) {
     const response = await fetch(
       `/api/browser/frame?${new URLSearchParams({ sessionId })}`,
-      { headers: this.headers(), signal },
+      { headers: await this.headers(), signal },
     );
     if (response.status === 404) return null;
     if (!response.ok) {
@@ -374,7 +359,7 @@ export class WebClient {
     const query = new URLSearchParams({ sessionId, id });
     if (after !== undefined) query.set("after", String(after));
     const response = await fetch(`/api/terminal/events?${query}`, {
-      headers: this.headers(),
+      headers: await this.headers(),
       signal,
     });
     if (!response.ok) {
@@ -627,7 +612,7 @@ export class WebClient {
         commandId,
         retry,
         images,
-        controllerId: this.controllerId,
+        controllerId: await controllerIdentity(),
       }),
       timeoutMs: 30_000,
       timeoutMessage:
