@@ -69,5 +69,5 @@ window.addEventListener("pagehide", () => {
 });
 // BFCache restores the same JS heap; reclaim before any later request.
 window.addEventListener("pageshow", (event) => {
-  if (event.persisted) void controllerIdentity();
+  if (event.persisted) void controllerIdentity().catch(() => {});
 });

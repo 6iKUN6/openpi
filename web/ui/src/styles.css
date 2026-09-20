@@ -714,7 +714,8 @@ svg { display: block; width: 1em; height: 1em; fill: none; stroke: currentColor;
 }
 
 .question-panel { min-height: 0; width: min(100% - 48px, 840px); align-self: center; margin: 8px auto; }
-.conversation-shell.has-view:not(.landing):has(> .question-panel) { grid-template-rows: auto minmax(0, 1fr) auto auto; }
+.landing:has(> .question-panel) .composer-dock { position: static; padding: 12px 24px 16px; }
+.landing:has(> .question-panel) .landing-welcome { display: none; }
 .question-card { display: flex; flex-direction: column; max-height: min(440px, 52dvh); border: 1px solid var(--border-strong); border-radius: 18px; background: var(--page); color: var(--text); overflow: clip; }
 .question-card-header { display: flex; flex-shrink: 0; align-items: center; gap: 12px; padding: 8px 12px 2px 16px; }
 .question-eyebrow { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
@@ -942,6 +943,7 @@ button.activity-chip:hover { filter: brightness(1.15); }
 
 /* Keep navigation and evidence independently reachable while browsing long ledgers. */
 .conversation-shell.has-view:not(.landing) { grid-template-rows:auto auto minmax(0,1fr) auto; }
+.conversation-shell.has-view:has(> .question-panel) { grid-template-rows: auto auto minmax(0, 1fr) auto auto; }
 .trajectory { padding-top:22px; overflow:hidden; }
 .trajectory-heading { flex-shrink:0; }
 .trajectory-body { flex:1; min-height:0; align-items:stretch; overflow:hidden; }

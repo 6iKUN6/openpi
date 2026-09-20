@@ -774,18 +774,21 @@ function buildEntries(
     });
   }
   let setupEpisode = false;
-  return entries.filter(({ message }) => {
+  const visible: DisplayEntry[] = [];
+  for (const entry of entries) {
+    const { message } = entry;
     if (message.customType === "openpi-setup-request") {
+      // The native marker identifies the episode. Hide its Web command echo
+      // too, otherwise the hidden replies leave a permanently waiting turn.
+      if (visible.at(-1)?.message.customType === "openpi-web-command-input")
+        visible.pop();
       setupEpisode = true;
-      return false;
+      continue;
     }
-    if (!setupEpisode) return true;
-    if (message.role === "user") {
-      setupEpisode = false;
-      return true;
-    }
-    return false;
-  });
+    if (message.role === "user") setupEpisode = false;
+    if (!setupEpisode) visible.push(entry);
+  }
+  return visible;
 }
 
 function ProcessSequence({

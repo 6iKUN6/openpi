@@ -2,8 +2,9 @@
 
 - Status: draft — implementation under review, not an accepted architectural Decision
 - Created / verified: 2026-09-20
-- Source boundary: `codex/web-ask-user`, upstream base `9d8ce99`, plus this implementation
+- Source boundary: `codex/web-ask-user`, upstream base `45f12a4`, plus this implementation
 - Issue: https://github.com/openpi-dev/openpi/issues/562
+- PR: https://github.com/openpi-dev/openpi/pull/595
 - Related: #348 (Setup), #470 (implementation handoff), #549 (controller identity), #540 (Stop), #561 (Web UI)
 - Supersedes: none; complements [Web structured questions](WEB_STRUCTURED_QUESTIONS.md)
 
@@ -100,7 +101,7 @@ classification change has automated coverage; fresh live-model acceptance is
 not claimed. No private Session, recording, credential or raw diagnostic export
 is included. Final check commands and results belong in the associated PR.
 
-At this source boundary, `bun run check` passes; the separate Vitest run passes
+At the earlier `9d8ce99` source boundary, `bun run check` passes; the separate Vitest run passes
 245 cases across 13 files; the standard browser suite passes 34 cases and the
 native-provider browser suite passes 10. The full Node suite reports 1,683
 passes, two failures and one platform skip. Both failures are the existing
@@ -111,8 +112,27 @@ reproduces both failures (22 passes, two failures in that file). No full-suite
 green result is claimed. These results use local Node 24.16.0 and synthetic
 browser data, not private provider requests.
 
-Open PRs #549, #540 and #561 modify shared Web surfaces. They are not merged into
-this implementation; controller identity, execution ownership and layout require
-reconciliation if those branches merge first. #578 is a separate TUI answer-editor
+At that earlier boundary, open PRs #549, #540 and #561 modified shared Web
+surfaces and had not been integrated. The 2026-09-20 semantic rebase now includes
+#561 at `45f12a4`, preserving its image transport, workbar, settings dialog,
+transcript processes and Setup filtering. The Web echo of a Setup command is
+hidden with its native episode so hidden replies cannot leave a permanently
+waiting command bubble. Settings-hosted questions and Stop remain accessible
+inside the active dialog. Exclusive Web Locks prevent inherited controller IDs
+from being used concurrently; see [the controller contract](WEB_STRUCTURED_QUESTIONS.md).
+#549 and #540 remain separate work. #578 is a separate TUI answer-editor
 fix, not this Web questionnaire. This implementation does not close all of #343,
 #348, #470 or the remaining proposals in #562.
+
+Integrated validation on 2026-09-20 against `45f12a4`: `bun run check`
+passed; the Node suite reported 1,712 passes, two failures and one platform
+skip. An unmodified archive of this upstream revision reproduced the same
+two Plan rendering failures (22 passes / two failures). The separate complete
+Vitest suite passed 318 tests across 22 files with `--maxWorkers=2`; default
+high parallelism had produced timeout failures in existing settings/sidebar
+tests. No timeout or assertion was relaxed. The standard browser suite passed
+50 tests and the native-provider suite passed 12, including copied-storage
+controller isolation and settings-dialog answer/cancellation flows. After the
+final CSS ordering adjustment, all seven question/handoff browser tests passed
+again. These are local automated results, not upstream acceptance or a fresh
+live-provider manual smoke.

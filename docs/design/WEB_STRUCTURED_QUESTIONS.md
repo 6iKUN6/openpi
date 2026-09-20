@@ -2,8 +2,8 @@
 
 - Status: `draft`
 - Created: 2026-09-18
-- Last verified: 2026-09-19 (local implementation and tests; not upstream acceptance)
-- Source boundary: `f6b49ae59605b1276b8267f2886d22c03f01533c` plus `codex/web-ask-user`
+- Last verified: 2026-09-20 (local implementation and tests; not upstream acceptance)
+- Source boundary: upstream `45f12a4b216993362940277b68a147737e31beb6` plus `codex/web-ask-user` / [PR #595](https://github.com/openpi-dev/openpi/pull/595)
 - Related Issues: [#343](https://github.com/openpi-dev/openpi/issues/343), [#348](https://github.com/openpi-dev/openpi/issues/348), [#470](https://github.com/openpi-dev/openpi/issues/470)
 - Related work: [#549](https://github.com/openpi-dev/openpi/pull/549)
 - Supersedes: none
@@ -27,6 +27,17 @@ The Host uses the controller contract introduced by PR #549:
 on prompt admission. That PR is not merged into this branch. The small identity
 changes will need reconciliation when integrating both branches; cleanup
 confirmation and its policy are not duplicated here.
+
+PR #595 review follow-up: a sessionStorage value alone is not a unique tab
+identity, because opener windows and duplicated tabs can inherit it. Before
+issuing any HTTP/SSE request, the page now claims an exclusive Web Lock for
+that UUID. A conflicting page rotates to a new UUID before sending its first
+request. Concurrent clients within one document share the pending claim.
+Page exit releases the claim; BFCache restoration reclaims before later
+requests. Without Web Locks, or if claiming is denied, a fresh UUID fails
+closed on inherited authority but cannot guarantee refresh recovery.
+This remains local controller isolation, not isolation from malicious
+same-origin JavaScript or shared transcript visibility.
 
 ## Runtime and transport
 
@@ -144,3 +155,14 @@ recommendation is now implemented through the owning Plan extension. See
 handoff, command feedback, streaming/cancellation corrections and limits.
 The associated PR records final validation after synchronization with main;
 the counts above remain historical observations of the earlier source boundary.
+
+Integration with #561 on 2026-09-20 retains the upstream workbar, image
+attachments and Setup episode filtering. Pending questions render inside the
+settings dialog while it is open, together with a Stop action; otherwise they
+use the inline panel. The main conversation grid reserves separate rows for
+the view switch, transcript, questions and Composer. Browser regressions use
+a real opener window (and therefore genuinely copied sessionStorage), reject
+its foreign dismissal with HTTP 403, recover the source question after refresh,
+and complete or cancel Setup questions inside the settings dialog. Setup
+completion is checked in native Session evidence, since #561 intentionally
+hides configuration replies from the main conversation.

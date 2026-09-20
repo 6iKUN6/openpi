@@ -513,6 +513,17 @@ it("keeps OpenPI setup episodes out of the main conversation", () => {
       timestamp: "2026-09-19T10:00:01Z",
       message: { role: "assistant", content: "Visible task response" },
     },
+    {
+      id: "setup-command",
+      type: "message",
+      timestamp: "2026-09-19T10:00:02Z",
+      message: {
+        role: "user",
+        content: "/openpi-setup Apply a dark theme",
+        customType: "openpi-web-command-input",
+        commandId: "setup-command-id",
+      },
+    },
     projectEntry({
       id: "setup-request",
       parentId: "before-assistant",
@@ -581,6 +592,7 @@ it("keeps OpenPI setup episodes out of the main conversation", () => {
   expect(screen.getByText("Visible continuation")).toBeTruthy();
   expect(screen.queryByText("Hidden configuration response")).toBeNull();
   expect(screen.queryByText("Hidden configuration evidence")).toBeNull();
+  expect(screen.queryByText("/openpi-setup Apply a dark theme")).toBeNull();
 });
 
 it("renders side conversation messages with transcript role styling", async () => {

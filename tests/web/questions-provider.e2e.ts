@@ -67,6 +67,7 @@ async function startQuestions(
   page: Page,
   workspace: string,
   prompt = "/openpi-setup 请先询问我的偏好，不要修改配置。",
+  fromSettings = false,
 ) {
   const imported = await page.request.post("/api/workspaces", {
     headers,
@@ -89,9 +90,17 @@ async function startQuestions(
     ).status(),
   ).toBe(200);
   await page.goto("/");
-  const input = page.getByRole("textbox", { name: "描述任务" });
-  await input.fill(prompt);
-  await input.press("Enter");
+  if (fromSettings) {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page
+      .getByRole("dialog", { name: "设置" })
+      .getByRole("button", { name: "配置 OpenPI", exact: true })
+      .click();
+  } else {
+    const input = page.getByRole("textbox", { name: "描述任务" });
+    await input.fill(prompt);
+    await input.press("Enter");
+  }
   await expect(page.locator(".question-card")).toBeVisible();
   return sessionId as string;
 }
@@ -199,12 +208,30 @@ for (const theme of ["light", "dark"] as const) {
       const next = JSON.stringify(provider.requests[1]!.body);
       expect(next).toContain("沿用当前主题");
       expect(next).toContain("桌面和手机都要验证");
+      // #561 hides Setup episodes from the main transcript. Completion must
+      // still be recorded by Pi, not inferred from the card disappearing.
+      await expect
+        .poll(async () => {
+          const snapshot = await (
+            await page.request.get("/api/snapshot", { headers })
+          ).json();
+          return (
+            snapshot.runtime.status === "idle" &&
+            snapshot.selectedSession.entries.some(
+              (entry: { message?: { role?: string; content?: string } }) =>
+                entry.message?.role === "assistant" &&
+                entry.message.content ===
+                  "Answers received. No settings were changed.",
+            )
+          );
+        })
+        .toBe(true);
+      await expect(card).toHaveCount(0);
       await expect(
-        page.getByText("Answers received. No settings were changed.", {
+        page.getByText("/openpi-setup 请先询问我的偏好，不要修改配置。", {
           exact: true,
         }),
-      ).toBeVisible();
-      await expect(card).toHaveCount(0);
+      ).toHaveCount(0);
     } finally {
       await provider.close();
       await rm(workspace, { recursive: true, force: true });
@@ -212,8 +239,36 @@ for (const theme of ["light", "dark"] as const) {
   });
 }
 
-for (const command of ["/openpi-setup", "/plan"]) {
-  test(`Stop cancels the actual pending ask_user in ${command} without manufacturing answers`, async ({
+test("Setup opened in settings completes questions inside the active dialog", async ({
+  page,
+}) => {
+  const provider = await startFakeProvider(stream);
+  const workspace = await mkdtemp(join(tmpdir(), "openpi-settings-questions-"));
+  try {
+    await startQuestions(page, workspace, undefined, true);
+    const dialog = page.getByRole("dialog", { name: "设置" });
+    await expect(dialog.locator(".question-card")).toBeVisible();
+    await dialog.getByRole("radio", { name: /完整交互/ }).check();
+    await dialog.getByRole("button", { name: "下一题" }).click();
+    await dialog.getByRole("radio", { name: /或自行撰写回复/ }).check();
+    await dialog.getByRole("textbox", { name: "你的答案" }).fill("只检查配置");
+    await dialog.getByRole("button", { name: "复核答案" }).click();
+    await dialog.getByRole("button", { name: "提交答案", exact: true }).click();
+    await expect.poll(() => provider.requests.length).toBe(2);
+    await expect(dialog.locator(".question-card")).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+  } finally {
+    await provider.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+for (const [command, fromSettings] of [
+  ["/openpi-setup", false],
+  ["/plan", false],
+  ["/openpi-setup", true],
+] as const) {
+  test(`Stop cancels the actual pending ask_user in ${command}${fromSettings ? " from settings" : ""} without manufacturing answers`, async ({
     page,
   }) => {
     const provider = await startFakeProvider(stream);
@@ -223,6 +278,7 @@ for (const command of ["/openpi-setup", "/plan"]) {
         page,
         workspace,
         `${command} 请先询问我的偏好，不要修改代码或配置。`,
+        fromSettings,
       );
       const cancellation = page.waitForResponse(
         (response) =>
@@ -258,6 +314,12 @@ for (const command of ["/openpi-setup", "/plan"]) {
           { exact: true },
         ),
       ).toHaveCount(0);
+      if (fromSettings) {
+        await page
+          .getByRole("dialog", { name: "设置" })
+          .getByRole("button", { name: "关闭", exact: true })
+          .click();
+      }
       const input = page.getByRole("textbox", { name: "描述任务" });
       await input.fill("你好");
       await input.press("Enter");
