@@ -3,6 +3,7 @@
 - Status: `draft`
 - Created: 2026-09-18
 - Last verified: 2026-09-20 (local implementation and tests; not upstream acceptance)
+- Documentation alignment: 2026-09-21, checked against PR #595 head `96a3b5e`; no new runtime or live-provider validation claimed
 - Source boundary: upstream `45f12a4b216993362940277b68a147737e31beb6` plus `codex/web-ask-user` / [PR #595](https://github.com/openpi-dev/openpi/pull/595)
 - Related Issues: [#343](https://github.com/openpi-dev/openpi/issues/343), [#348](https://github.com/openpi-dev/openpi/issues/348), [#470](https://github.com/openpi-dev/openpi/issues/470)
 - Related work: [#549](https://github.com/openpi-dev/openpi/pull/549)
@@ -106,10 +107,16 @@ labels from their item text.
 `/plan` is registered by `extensions/plan-mode/index.ts`, using Pi's extension
 command and Session primitives. The Web runtime binds extensions in print mode;
 Plan Ready's interactive editor/select actions still require a separate bridge
-([#470](https://github.com/openpi-dev/openpi/issues/470)). A future Composer mode
-control should project canonical inactive/planning/ready state and keep explicit
-implementation review separate from turning planning off. This is a follow-up
-recommendation, not an implemented control or accepted architectural Decision.
+([#470](https://github.com/openpi-dev/openpi/issues/470)). The Composer mode
+control is implemented in PR #595 and projects the canonical
+inactive/planning/ready state. It changes mode through the owning Plan extension,
+which persists the state in the Pi Session; the runtime checks that the Session
+is idle and the state revision is current. Switching mode does not send a prompt,
+call the model or clear the draft. Turning planning off does not approve
+implementation of a previous plan. See
+[Plan ownership and presentation](WEB_INTERACTION_UI.md#plan-ownership-and-presentation)
+for the control's lifecycle and limits. This describes the implementation under
+review, not an accepted architectural Decision.
 
 ## Validation contract
 
