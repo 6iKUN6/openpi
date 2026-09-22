@@ -42,7 +42,9 @@ test("native command feedback survives refresh without model calls", async ({
       ["/usage", "No supported authenticated providers found"],
     ]) {
       await input.fill(command!);
-      await input.press("Enter");
+      // Enter can complete an asynchronously loaded slash-menu item instead
+      // of submitting it. This scenario verifies feedback, not completion.
+      await page.getByRole("button", { name: "发送", exact: true }).click();
       await expect(
         page.locator(".command-feedback").filter({ hasText: feedback! }).last(),
       ).toBeVisible();

@@ -80,12 +80,17 @@ async function startQuestions(
     data: { workspacePath: path, commandId: `questions-${Date.now()}` },
   });
   expect(created.status()).toBe(201);
-  const { sessionId } = await created.json();
+  const { sessionId, sessionPath } = await created.json();
   expect(
     (
       await page.request.post("/api/model", {
         headers,
-        data: { sessionId, provider: PROVIDER_ID, modelId: MODEL_ID },
+        data: {
+          sessionId,
+          sessionPath,
+          provider: PROVIDER_ID,
+          modelId: MODEL_ID,
+        },
       })
     ).status(),
   ).toBe(200);

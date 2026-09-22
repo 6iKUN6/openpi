@@ -1561,6 +1561,39 @@ function thinkingPickerName(level: string) {
   return `${i18n.t("thinkingLevel")}: ${level}`;
 }
 
+it.each([null, "/tmp/copy"])(
+  "disables the stale composer until file selection %s is confirmed",
+  (selectedPath) => {
+    const snapshot = idleThinkingSnapshot();
+    const { rerender } = renderWithI18n(
+      createElement(Composer, {
+        ...thinkingProps(snapshot),
+        selectedPath,
+      }),
+    );
+    expect(
+      screen.getByRole<HTMLTextAreaElement>("textbox", {
+        name: i18n.t("describeTask"),
+      }).disabled,
+    ).toBe(true);
+    rerender(
+      createElement(
+        I18nextProvider,
+        { i18n },
+        createElement(Composer, {
+          ...thinkingProps(snapshot),
+          selectedPath: snapshot.selectedSession!.path,
+        }),
+      ),
+    );
+    expect(
+      screen.getByRole<HTMLTextAreaElement>("textbox", {
+        name: i18n.t("describeTask"),
+      }).disabled,
+    ).toBe(false);
+  },
+);
+
 describe("thinking level picker", () => {
   it("renders nothing when the snapshot has no thinking projection", () => {
     const snapshot = idleThinkingSnapshot();
@@ -1662,7 +1695,7 @@ describe("thinking level picker", () => {
     const snapshot = idleThinkingSnapshot();
     const client = new ThinkingClient();
     const store = createWebStore(client);
-    store.setState({ snapshot });
+    store.setState({ snapshot, selectedPath: snapshot.selectedSession!.path });
     const selectThinking = vi.spyOn(store.getState().actions, "selectThinking");
     try {
       renderWithI18n(
@@ -2043,6 +2076,7 @@ it("renders explicit choices for an unknown prompt admission", () => {
       promptAdmissionPending: false,
       promptAdmissionRecovery: {
         sessionId: "session",
+        sessionPath: snapshot.selectedSession!.path,
         content: "keep this draft",
         commandId: "unknown-command",
         optimisticKey: "optimistic-unknown-command",
@@ -2087,6 +2121,7 @@ it("requires another canonical check after admission verification fails", () => 
       promptAdmissionPending: false,
       promptAdmissionRecovery: {
         sessionId: "session",
+        sessionPath: snapshot.selectedSession!.path,
         content: "keep this draft",
         commandId: "unknown-command",
         optimisticKey: "optimistic-unknown-command",
@@ -2133,6 +2168,7 @@ it.each(["keep this draft", "  keep this draft  ", "\nkeep this draft\n"])(
       promptAdmissionPending: false,
       promptAdmissionRecovery: {
         sessionId: "session",
+        sessionPath: snapshot.selectedSession!.path,
         content: "keep this draft",
         commandId: "unknown-command",
         optimisticKey: "optimistic-unknown-command",
@@ -2189,6 +2225,7 @@ it("keeps an emptied recovery draft empty across verification and submission pha
     promptAdmissionPending: false,
     promptAdmissionRecovery: {
       sessionId: "session",
+      sessionPath: snapshot.selectedSession!.path,
       content: "original",
       commandId: "unknown-command",
       optimisticKey: "optimistic-unknown-command",
@@ -2270,6 +2307,7 @@ it("preserves an edited recovered draft when late evidence arrives", () => {
     promptAdmissionPending: false,
     promptAdmissionRecovery: {
       sessionId: "session",
+      sessionPath: snapshot.selectedSession!.path,
       content: "original",
       commandId: "unknown-command",
       optimisticKey: "optimistic-unknown-command",
@@ -2670,6 +2708,7 @@ it("keeps a retyped recovery draft when sending as new settles", async () => {
     promptAdmissionPending: false,
     promptAdmissionRecovery: {
       sessionId: "session",
+      sessionPath: snapshot.selectedSession!.path,
       content: "first",
       commandId: "unknown-command",
       optimisticKey: "optimistic-unknown-command",

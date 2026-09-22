@@ -72,6 +72,7 @@ export class WebRuntimeRequestError extends Error {
 export interface WebPromptOptions {
   commandId?: string;
   expectedSessionId?: string;
+  expectedSessionPath?: string;
   images?: readonly WebPromptImage[];
 }
 
@@ -101,10 +102,12 @@ export interface WebTurnCancellationResult extends WebActiveTurn {
 
 export interface WebModelSelectionOptions {
   expectedSessionId?: string;
+  expectedSessionPath?: string;
 }
 
 export interface WebThinkingSelectionOptions {
   expectedSessionId?: string;
+  expectedSessionPath?: string;
 }
 
 export interface WebThinkingProjection {

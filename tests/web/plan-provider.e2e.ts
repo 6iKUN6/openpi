@@ -67,11 +67,17 @@ test("Plan switch changes only owner state; first message gets planning context 
         commandId: "plan-switch",
       },
     });
-    const { sessionId } = await created.json();
-    await page.request.post("/api/model", {
+    const { sessionId, sessionPath } = await created.json();
+    const model = await page.request.post("/api/model", {
       headers,
-      data: { sessionId, provider: PROVIDER_ID, modelId: MODEL_ID },
+      data: {
+        sessionId,
+        sessionPath,
+        provider: PROVIDER_ID,
+        modelId: MODEL_ID,
+      },
     });
+    expect(model.status()).toBe(200);
     await page.goto("/");
     const input = page.getByRole("textbox", { name: "描述任务" });
     const placeholder = "本次对话使用 Plan 模式 · 继续讨论计划，暂不实施";
@@ -320,6 +326,7 @@ for (const theme of ["light", "dark"] as const) {
         headers,
         data: {
           sessionId: session.sessionId,
+          sessionPath: session.sessionPath,
           provider: PROVIDER_ID,
           modelId: MODEL_ID,
         },

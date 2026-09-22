@@ -39,6 +39,10 @@ after(async () => {
   await rm(hostAgentDirectory, { recursive: true, force: true });
 });
 
+function mutationSessionPath(manager: WebRuntimeController["sessionManager"]) {
+  return manager.getSessionFile() ?? `current:${manager.getSessionId()}`;
+}
+
 // Use a raw document request: fetch always sets Sec-Fetch-Mode to cors.
 function documentRequest(url: string, headers: Record<string, string> = {}) {
   return new Promise<Response>((resolve, reject) => {
@@ -772,6 +776,7 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
         provider: "missing",
         modelId: "missing",
         sessionId: sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(sessionManager),
       }),
     });
     assert.equal(unavailableModel.status, 400);
@@ -953,7 +958,11 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
     const wrongSession = await fetch(`${launched.origin}/api/prompt`, {
       method: "POST",
       headers: authorized,
-      body: JSON.stringify({ sessionId: "other", content: "wrong target" }),
+      body: JSON.stringify({
+        sessionId: "other",
+        sessionPath: mutationSessionPath(sessionManager),
+        content: "wrong target",
+      }),
     });
     assert.equal(wrongSession.status, 409);
 
@@ -962,6 +971,7 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
       headers: authorized,
       body: JSON.stringify({
         sessionId: sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(sessionManager),
         content: "continue here",
       }),
     });
@@ -1404,6 +1414,7 @@ test("an unbound Host exposes no bootstrap Session and rejects prompt bypasses",
       headers,
       body: JSON.stringify({
         sessionId: sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(sessionManager),
         content: "must not run",
       }),
     });
@@ -1487,6 +1498,7 @@ test("returns accepted only after Pi admits the prompt", async () => {
       },
       body: JSON.stringify({
         sessionId: sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(sessionManager),
         content: "hello",
       }),
     });
@@ -1602,7 +1614,7 @@ test("thinking selection validates its body and returns the applied projection",
     });
     assert.equal(missingSession.status, 400);
     assert.deepEqual(await missingSession.json(), {
-      error: "sessionId and a valid level are required",
+      error: "sessionId, sessionPath, and a valid level are required",
     });
 
     const invalidLevel = await fetch(`${launched.origin}/api/thinking`, {
@@ -1610,6 +1622,7 @@ test("thinking selection validates its body and returns the applied projection",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         level: "ultra",
       }),
     });
@@ -1622,6 +1635,7 @@ test("thinking selection validates its body and returns the applied projection",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         level: "high",
       }),
     });
@@ -1662,6 +1676,7 @@ test("thinking selection requires a workspace and available runtime control", as
           headers: { ...unboundHost.headers, ...headers },
           body: JSON.stringify({
             sessionId: unbound.sessionManager.getSessionId(),
+            sessionPath: mutationSessionPath(unbound.sessionManager),
             level: "high",
           }),
         },
@@ -1682,6 +1697,7 @@ test("thinking selection requires a workspace and available runtime control", as
           headers: { ...unavailableHost.headers, ...headers },
           body: JSON.stringify({
             sessionId: unavailable.sessionManager.getSessionId(),
+            sessionPath: mutationSessionPath(unavailable.sessionManager),
             level: "high",
           }),
         },
@@ -1838,6 +1854,7 @@ test("POST /api/thinking bounds an oversized projection at the host boundary", a
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         level: "high",
       }),
     });
@@ -1874,6 +1891,7 @@ test("POST /api/thinking reports unavailable levels for a non-reasoning model", 
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         level: "high",
       }),
     });
@@ -1915,6 +1933,7 @@ test("stop waits for an in-flight thinking selection before disposal", async () 
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         level: "high",
       }),
     });
@@ -2705,6 +2724,7 @@ test("rejects prompt admission with the runtime's typed receipt", async () => {
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         content: "reject me",
         commandId: "rejected-admission",
         retry: false,
@@ -2720,6 +2740,7 @@ test("rejects prompt admission with the runtime's typed receipt", async () => {
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         content: "reject me",
         commandId: "rejected-admission",
         retry: true,
@@ -2756,6 +2777,7 @@ test("replays one prompt admission after a browser timeout", async () => {
   const commandId = "browser-timeout-retry";
   const prompt = {
     sessionId: runtime.sessionManager.getSessionId(),
+    sessionPath: mutationSessionPath(runtime.sessionManager),
     content: "send this exactly once",
     commandId,
   };
@@ -2862,6 +2884,7 @@ test("fails closed instead of evicting pending prompt admissions", {
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionId: runtime.sessionManager.getSessionId(),
+          sessionPath: mutationSessionPath(runtime.sessionManager),
           content: `pending ${index}`,
           commandId: `pending-${index}`,
           retry: false,
@@ -2876,6 +2899,7 @@ test("fails closed instead of evicting pending prompt admissions", {
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         content: "must not replace a pending admission",
         commandId: "overflow",
         retry: false,
@@ -2916,6 +2940,7 @@ test("returns and publishes the observed follow-up queue receipt", async () => {
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         content: "queue me",
       }),
     });
@@ -3417,6 +3442,7 @@ test("stop rejects a late keepalive mutation before it enters the drain", async 
     await once(socket, "connect");
     const promptBody = JSON.stringify({
       sessionId: runtime.sessionManager.getSessionId(),
+      sessionPath: mutationSessionPath(runtime.sessionManager),
       content: "hold the first request",
     });
     socket.write(
@@ -3579,6 +3605,7 @@ test("stop disposes the runtime before waiting for an in-flight prompt request",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId: runtime.sessionManager.getSessionId(),
+        sessionPath: mutationSessionPath(runtime.sessionManager),
         content: "pending during shutdown",
       }),
     });

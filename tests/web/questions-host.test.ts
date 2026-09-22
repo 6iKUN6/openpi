@@ -81,6 +81,7 @@ test("authenticated Host binds questions to prompt controller, rejects replay th
   try {
     const prompt = {
       sessionId,
+      sessionPath: manager.getSessionFile() ?? `current:${sessionId}`,
       content: "ask",
       commandId: "prompt",
       controllerId: controller,
