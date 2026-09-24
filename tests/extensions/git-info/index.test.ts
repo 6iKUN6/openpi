@@ -42,7 +42,10 @@ test("automatic refresh with a spaced fixture path stays local until /pr explici
     // use copied Node executables with a per-process command shim instead.
     writeFileSync(
       commandRunner,
-      `const { appendFileSync } = require("node:fs");
+      `const { appendFileSync, writeFileSync } = require("node:fs");
+// This preload must exit before Node tries to load Git's arguments as a file.
+// Windows pipes are asynchronous: flush the fixture output before exiting.
+const output = (text) => writeFileSync(1, text);
 const command = /[\\\\/]git\\.exe$/i.test(process.execPath)
   ? "git"
   : /[\\\\/]gh\\.exe$/i.test(process.execPath)
@@ -54,15 +57,15 @@ const args = [
 ];
 if (command === "git") {
   const key = \`\${args[0] ?? ""} \${args[1] ?? ""}\`;
-  if (key === "rev-parse --is-inside-work-tree") process.stdout.write("true\\n");
-  else if (key === "branch --show-current") process.stdout.write("main\\n");
-  else if (key === "rev-parse --short") process.stdout.write("abc123\\n");
-  else if (key === "status --porcelain=v1") process.stdout.write(" M local.ts\\n?? new.ts\\n");
+  if (key === "rev-parse --is-inside-work-tree") output("true\\n");
+  else if (key === "branch --show-current") output("main\\n");
+  else if (key === "rev-parse --short") output("abc123\\n");
+  else if (key === "status --porcelain=v1") output(" M local.ts\\n?? new.ts\\n");
   else process.exitCode = 2;
   process.exit();
 } else if (command === "gh") {
   appendFileSync(process.env.GH_CALL_LOG, args.join(" ") + "\\n");
-  process.stdout.write("{\\"number\\":42,\\"url\\":\\"https://example.test/pr/42\\",\\"state\\":\\"OPEN\\",\\"isDraft\\":false}\\n");
+  output("{\\"number\\":42,\\"url\\":\\"https://example.test/pr/42\\",\\"state\\":\\"OPEN\\",\\"isDraft\\":false}\\n");
   process.exit();
 }
 `,
@@ -122,11 +125,7 @@ printf '%s\\n' '{"number":42,"url":"https://example.test/pr/42","state":"OPEN","
     events: {
       on: () => () => undefined,
       emit: (channel: string, value: unknown) => {
-        if (
-          channel === GIT_INFO_CHANNEL &&
-          isGitInfoState(value) &&
-          value.isRepository
-        ) {
+        if (channel === GIT_INFO_CHANNEL && isGitInfoState(value)) {
           resolveLocal(value);
         }
       },
@@ -165,6 +164,11 @@ printf '%s\\n' '{"number":42,"url":"https://example.test/pr/42","state":"OPEN","
         );
       }),
     ]).finally(() => clearTimeout(timeoutHandle));
+    assert.equal(
+      local.isRepository,
+      true,
+      "the initial Git fixture refresh must recognize the repository",
+    );
     assert.equal(local.branch, "main");
     assert.equal(local.changedFiles, 2);
     assert.equal(local.pullRequest, null);
