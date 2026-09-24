@@ -183,7 +183,15 @@ printf '%s\\n' '{"number":42,"url":"https://example.test/pr/42","state":"OPEN","
     else process.env.GH_CALL_LOG = previousLog;
     if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
     else process.env.NODE_OPTIONS = previousNodeOptions;
-    rmSync(root, { recursive: true, force: true });
+    // Windows can keep a just-exited copied `gh.exe` handle open briefly.
+    // Retry the bounded fixture cleanup instead of turning that OS race into
+    // a failure after all assertions have passed.
+    rmSync(root, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 10 : 0,
+      retryDelay: 100,
+    });
   }
 });
 
