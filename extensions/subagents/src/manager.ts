@@ -548,6 +548,7 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
       Effect.gen(function* () {
         const origin: SubagentOrigin = task.origin ?? "model";
         let admissionLease: ChildExecutionLease | undefined;
+        let admissionAbandoned = false;
         let poolReservationHeld = false;
         let leaseTransferred = false;
         const doSpawn = Effect.gen(function* () {
@@ -574,12 +575,19 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
             },
           );
           if (config.admission) {
-            admissionLease = yield* Effect.tryPromise({
+            const admission = config.admission;
+            yield* Effect.tryPromise({
+              // Take the lease in the promise continuation, not after the
+              // fiber resumes: an interrupt can land after admission granted
+              // the permit but before this fiber runs again, and the
+              // finalizer below must still find (or already have released) it.
               try: (signal) =>
-                config.admission!.acquire(
-                  origin === "btw" ? "btw" : "direct",
-                  signal,
-                ),
+                admission
+                  .acquire(origin === "btw" ? "btw" : "direct", signal)
+                  .then((lease) => {
+                    if (admissionAbandoned) lease.release();
+                    else admissionLease = lease;
+                  }),
               catch: (error) =>
                 new SpawnError({
                   message:
@@ -672,6 +680,7 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
         return yield* doSpawn.pipe(
           Effect.ensuring(
             Effect.sync(() => {
+              admissionAbandoned = true;
               if (poolReservationHeld) {
                 if (origin === "btw") reservedBtw--;
                 else reservedModel--;
@@ -818,22 +827,30 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
           // both pass the check in that window. Cleared by RunStarted/settle,
           // or here when the backend rejects the send.
           entry.restarting = true;
+          let admissionAbandoned = false;
           return Effect.gen(function* () {
             if (config.admission) {
+              const admission = config.admission;
               const admissionAbort = new AbortController();
               entry.admissionAbort = admissionAbort;
-              const lease = yield* Effect.tryPromise({
+              yield* Effect.tryPromise({
+                // Same interrupt window as spawn: hand the lease to the entry
+                // from the continuation so onError below can always release it.
                 try: (signal) => {
                   const abortForEffect = () =>
                     admissionAbort.abort(signal.reason);
                   signal.addEventListener("abort", abortForEffect, {
                     once: true,
                   });
-                  return config
-                    .admission!.acquire(
+                  return admission
+                    .acquire(
                       origin === "btw" ? "btw" : "direct",
                       admissionAbort.signal,
                     )
+                    .then((lease) => {
+                      if (admissionAbandoned) lease.release();
+                      else entry.admissionLease = lease;
+                    })
                     .finally(() =>
                       signal.removeEventListener("abort", abortForEffect),
                     );
@@ -847,12 +864,12 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
                   }),
               });
               entry.admissionAbort = undefined;
-              entry.admissionLease = lease;
             }
             return yield* entry.session.send(text);
           }).pipe(
             Effect.onError(() =>
               Effect.sync(() => {
+                admissionAbandoned = true;
                 entry.restarting = false;
                 entry.admissionAbort?.abort();
                 entry.admissionAbort = undefined;

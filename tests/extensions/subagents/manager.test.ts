@@ -354,6 +354,93 @@ test("releases local pool reservations when shared admission rejects queued spaw
   }
 });
 
+test("FAIL: a Direct spawn aborted as admission grants its slot releases the permit", async () => {
+  const admission = new ChildExecutionAdmission({ maxActive: 1 });
+  await withManager(
+    async (manager, runtime) => {
+      const blocker = await admission.acquire("workflow");
+      const abort = new AbortController();
+      const queued = runTool(
+        runtime,
+        manager.spawn("pi", task("granted then aborted")),
+        { signal: abort.signal },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(admission.snapshot().queuedByOrigin.direct, 1);
+      // The Workflow child settles and the user presses Esc in the same turn:
+      // admission grants the queued spawn before its fiber can resume.
+      blocker.release();
+      abort.abort(new Error("Esc"));
+      await assert.rejects(queued);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(manager.view.list().length, 0);
+      assert.equal(admission.snapshot().held, 0);
+    },
+    { admission },
+  );
+});
+
+test("FAIL: one Esc aborting two parallel Direct spawns leaves no held permit", async () => {
+  const base = stubBackend();
+  // Real Pi child startup takes long enough for one turn abort to interrupt
+  // the first spawn mid-startup while the second is still queued.
+  const slow: SubagentBackend = {
+    ...base,
+    spawn: (spawnTask) =>
+      Effect.andThen(Effect.sleep("2 seconds"), base.spawn(spawnTask)),
+  };
+  const admission = new ChildExecutionAdmission({ maxActive: 1 });
+  await withManager(
+    async (manager, runtime) => {
+      const turn = new AbortController();
+      const spawns = ["A", "B"].map((name) =>
+        runTool(runtime, manager.spawn("pi", task(name)), {
+          signal: turn.signal,
+        }).catch((error: unknown) => error),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(admission.snapshot().held, 1);
+      assert.equal(admission.snapshot().queued, 1);
+      turn.abort(new Error("Esc"));
+      await Promise.all(spawns);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(manager.view.list().length, 0);
+      assert.equal(admission.snapshot().held, 0);
+      assert.equal(admission.snapshot().queued, 0);
+    },
+    { admission },
+    [slow],
+  );
+});
+
+test("FAIL: a Direct restart aborted as admission grants its slot releases the permit", async () => {
+  const admission = new ChildExecutionAdmission({ maxActive: 1 });
+  await withManager(
+    async (manager, runtime) => {
+      const snap = await runTool(
+        runtime,
+        manager.spawn("pi", task("settle before restart")),
+      );
+      await runTool(runtime, manager.waitFor([snap.id]));
+      assert.equal(admission.snapshot().held, 0);
+
+      const blocker = await admission.acquire("workflow");
+      const abort = new AbortController();
+      const restart = runTool(runtime, manager.send(snap.id, "again"), {
+        signal: abort.signal,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(admission.snapshot().queuedByOrigin.direct, 1);
+      blocker.release();
+      abort.abort(new Error("Esc"));
+      await assert.rejects(restart);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(admission.snapshot().held, 0);
+    },
+    { admission },
+  );
+});
+
 test("FAIL: an uncertain Direct stop retains its shared slot and cannot restart", async () => {
   const admission = new ChildExecutionAdmission({ maxActive: 1 });
   await withManager(
