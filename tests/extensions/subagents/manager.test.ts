@@ -19,6 +19,7 @@ import type {
   SpawnTask,
   SubagentStatus,
 } from "../../../extensions/subagents/src/domain.ts";
+import { SendError } from "../../../extensions/subagents/src/domain.ts";
 import {
   makeSubagentManagerLayer,
   MAX_RUNNING,
@@ -574,6 +575,128 @@ test("FAIL: a second send cannot bypass a queued restart's admission", async () 
       }
       await runTool(runtime, manager.waitFor([snap.id]));
       assert.deepEqual(sent, ["admitted"]);
+      assert.equal(admission.snapshot().held, 0);
+      assert.equal(admission.snapshot().queued, 0);
+    },
+    { admission },
+    [backend],
+  );
+});
+
+test("FAIL: cleanup after lease storage preserves a replacement's cancellation identity", async () => {
+  const admission = new ChildExecutionAdmission({ maxActive: 1 });
+  await withManager(
+    async (manager, runtime) => {
+      const snap = await runTool(runtime, manager.spawn("pi", task("First")));
+      await runTool(runtime, manager.waitFor([snap.id]));
+      const firstGeneration = snap.runGeneration;
+      const firstText = snap.finalText;
+      const blocker = await admission.acquire("workflow");
+      const acquire = admission.acquire.bind(admission);
+      let intercept = true;
+      let firstCancelled = false;
+      let replacementCancelled = false;
+      let replacementGranted = false;
+      let replacement: Promise<void> | undefined;
+      admission.acquire = (origin, signal) => {
+        const pending = acquire(origin, signal);
+        if (origin === "direct" && intercept) {
+          intercept = false;
+          void pending.then(() =>
+            // Let the manager's continuation store the old lease, then
+            // cancel before the Effect fiber resumes and dispatches it.
+            queueMicrotask(() => {
+              firstCancelled = runtime.runSync(manager.cancel([snap.id]))[0]!
+                .cancelled;
+              replacement = runTool(
+                runtime,
+                manager.send(snap.id, "replacement"),
+              );
+              void replacement.catch(() => {});
+            }),
+          );
+        }
+        return pending;
+      };
+      const unsubscribe = admission.subscribe(() => {
+        const state = admission.snapshot();
+        if (
+          !firstCancelled ||
+          replacementGranted ||
+          state.heldByOrigin.direct !== 1 ||
+          state.queued !== 0
+        )
+          return;
+        replacementGranted = true;
+        replacementCancelled = runtime.runSync(manager.cancel([snap.id]))[0]!
+          .cancelled;
+      });
+      const restart = runTool(runtime, manager.send(snap.id, "cancelled"));
+      const rejected = assert.rejects(restart, /aborted/);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(admission.snapshot().queued, 1);
+      try {
+        blocker.release();
+        await rejected;
+        assert.ok(replacement);
+        assert.equal(replacementCancelled, true);
+        await assert.rejects(replacement, /aborted/);
+        await runTool(runtime, manager.waitFor([snap.id]));
+        assert.equal(snap.runGeneration, firstGeneration);
+        assert.equal(snap.finalText, firstText);
+        assert.equal(admission.snapshot().held, 0);
+        assert.equal(admission.snapshot().queued, 0);
+      } finally {
+        unsubscribe();
+        await replacement?.catch(() => {});
+      }
+    },
+    { admission },
+  );
+});
+
+test("FAIL: a backend-rejected restart releases its lease and retry still needs admission", async () => {
+  const admission = new ChildExecutionAdmission({ maxActive: 1 });
+  const base = stubBackend();
+  let rejectNextSend = true;
+  const backend: SubagentBackend = {
+    ...base,
+    spawn: (spawnTask) =>
+      base.spawn(spawnTask).pipe(
+        Effect.map((session) => ({
+          ...session,
+          send: (text) =>
+            Effect.suspend(() => {
+              if (rejectNextSend) {
+                rejectNextSend = false;
+                return new SendError({ message: "backend rejected restart" });
+              }
+              return session.send(text);
+            }),
+        })),
+      ),
+  };
+  await withManager(
+    async (manager, runtime) => {
+      const snap = await runTool(runtime, manager.spawn("pi", task("First")));
+      await runTool(runtime, manager.waitFor([snap.id]));
+      await assert.rejects(
+        runTool(runtime, manager.send(snap.id, "rejected")),
+        /backend rejected restart/,
+      );
+      assert.equal(admission.snapshot().held, 0);
+
+      const blocker = await admission.acquire("workflow");
+      const retry = runTool(runtime, manager.send(snap.id, "retry"));
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(admission.snapshot().queuedByOrigin.direct, 1);
+      } finally {
+        blocker.release();
+        await retry;
+      }
+      await runTool(runtime, manager.waitFor([snap.id]));
+      assert.match(snap.finalText, /retry/);
       assert.equal(admission.snapshot().held, 0);
       assert.equal(admission.snapshot().queued, 0);
     },

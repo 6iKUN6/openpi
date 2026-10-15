@@ -898,7 +898,8 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
                 if (
                   !admissionAbort ||
                   entry.admissionAbort === admissionAbort ||
-                  (restartLease !== undefined &&
+                  (entry.admissionAbort === undefined &&
+                    restartLease !== undefined &&
                     entry.admissionLease === restartLease)
                 ) {
                   entry.restarting = false;
