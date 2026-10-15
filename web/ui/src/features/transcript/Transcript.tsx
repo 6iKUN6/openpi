@@ -1342,6 +1342,7 @@ function buildEntries(
   const nativeMessages = entries.map((entry) => ({
     identity: messageIdentity(entry.message),
     signature: legacySignature(entry.message),
+    content: entry.message.content,
   }));
   const matchedMessages = new Set<number>();
   const persistedPositions = new Map(
@@ -1462,13 +1463,20 @@ function buildEntries(
       const identity = messageIdentity(message);
       const legacy =
         identity === undefined ? legacySignature(message) : undefined;
+      // A live message shortened to fit one SSE event never equals its
+      // persisted entry; the same identity with a matching text prefix does.
+      const transportPrefix = message.truncation?.transport
+        ? message.content.replace(/\n\[truncated\]$/, "")
+        : undefined;
       const match = nativeMessages.findIndex(
         (candidate, index) =>
           !matchedMessages.has(index) &&
           (identity === undefined
             ? candidate.signature === legacy
             : candidate.identity === identity &&
-              candidate.signature === legacySignature(message)),
+              (transportPrefix !== undefined
+                ? candidate.content.startsWith(transportPrefix)
+                : candidate.signature === legacySignature(message))),
       );
       if (match >= 0) {
         matchedMessages.add(match);
