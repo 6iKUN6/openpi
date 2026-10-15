@@ -1250,10 +1250,11 @@ test("model configuration drafts survive switching settings tabs", async ({
   const dialog = page.getByRole("dialog", { name: "设置" });
   const generalTab = dialog.getByRole("tab", { name: "常规", exact: true });
   await generalTab.focus();
-  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowDown");
   await expect(
-    dialog.getByRole("tab", { name: "模型", exact: true }),
+    dialog.getByRole("tab", { name: "外观", exact: true }),
   ).toBeFocused();
+  await dialog.getByRole("tab", { name: "模型", exact: true }).click();
   await dialog
     .getByRole("button", { name: "添加模型提供商", exact: true })
     .click();
@@ -1270,7 +1271,7 @@ test("model configuration drafts survive switching settings tabs", async ({
   await dialog.getByRole("tab", { name: "技能", exact: true }).click();
   await page.keyboard.press("End");
   await expect(
-    dialog.getByRole("tab", { name: "插件", exact: true }),
+    dialog.getByRole("tab", { name: "浏览器", exact: true }),
   ).toBeFocused();
   await page.keyboard.press("Home");
   await expect(generalTab).toBeFocused();

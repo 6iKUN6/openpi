@@ -210,6 +210,7 @@ test("Plan switch changes only owner state; first message gets planning context 
     await expect(page.locator(".message-row.user")).toHaveCount(0);
     await page.getByRole("button", { name: "设置", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "设置" });
+    await settings.getByRole("tab", { name: "外观", exact: true }).click();
     // Theme is a direct UI preference; model-driven setup remains blocked.
     await expect(
       settings.getByRole("radio", { name: "深色", exact: true }),
@@ -268,13 +269,11 @@ test("Plan switch changes only owner state; first message gets planning context 
     await expect(input).toHaveValue("下一条草稿");
     expect(provider.requests).toHaveLength(2);
     await page.getByRole("button", { name: "设置", exact: true }).click();
+    await settings.getByRole("tab", { name: "外观", exact: true }).click();
     await expect(
       settings.getByRole("radio", { name: "深色", exact: true }),
     ).toBeEnabled();
-    await settings
-      .locator(".settings-theme-option")
-      .filter({ hasText: "深色" })
-      .click();
+    await settings.getByRole("radio", { name: "深色", exact: true }).click();
     await expect(
       settings.getByText("显示设置已保存。", { exact: true }),
     ).toBeVisible();
@@ -283,7 +282,8 @@ test("Plan switch changes only owner state; first message gets planning context 
     ).toBeChecked();
     expect(provider.requests).toHaveLength(2);
     await page.reload();
-    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await expect(settings).toBeVisible();
+    await settings.getByRole("tab", { name: "外观", exact: true }).click();
     await expect(
       settings.getByRole("radio", { name: "深色", exact: true }),
     ).toBeChecked();
