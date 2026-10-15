@@ -804,6 +804,12 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
             message: `Subagent "${id}" is no longer tracked.`,
           });
         }
+        if (entry.admissionAbort) {
+          return new SendError({
+            message:
+              "A subagent restart is waiting for a shared child execution slot.",
+          });
+        }
         if (entry.admissionUncertain) {
           return new SendError({
             message:
@@ -828,11 +834,14 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
           // or here when the backend rejects the send.
           entry.restarting = true;
           let admissionAbandoned = false;
+          let restartLease: ChildExecutionLease | undefined;
+          const admissionAbort = config.admission
+            ? new AbortController()
+            : undefined;
+          entry.admissionAbort = admissionAbort;
           return Effect.gen(function* () {
-            if (config.admission) {
+            if (config.admission && admissionAbort) {
               const admission = config.admission;
-              const admissionAbort = new AbortController();
-              entry.admissionAbort = admissionAbort;
               yield* Effect.tryPromise({
                 // Same interrupt window as spawn: hand the lease to the entry
                 // from the continuation so onError below can always release it.
@@ -848,8 +857,15 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
                       admissionAbort.signal,
                     )
                     .then((lease) => {
-                      if (admissionAbandoned) lease.release();
-                      else entry.admissionLease = lease;
+                      if (admissionAbandoned || admissionAbort.signal.aborted) {
+                        lease.release();
+                        throw (
+                          admissionAbort.signal.reason ??
+                          new Error("Subagent restart was aborted")
+                        );
+                      }
+                      restartLease = lease;
+                      entry.admissionLease = lease;
                     })
                     .finally(() =>
                       signal.removeEventListener("abort", abortForEffect),
@@ -863,6 +879,13 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
                         : "Could not acquire a shared child execution slot.",
                   }),
               });
+              // Explicit cancel can land after the promise continuation but
+              // before this fiber resumes. Never dispatch that stale restart.
+              if (admissionAbort.signal.aborted) {
+                return yield* new SendError({
+                  message: "Subagent restart was aborted",
+                });
+              }
               entry.admissionAbort = undefined;
             }
             return yield* entry.session.send(text);
@@ -870,11 +893,21 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
             Effect.onError(() =>
               Effect.sync(() => {
                 admissionAbandoned = true;
-                entry.restarting = false;
-                entry.admissionAbort?.abort();
-                entry.admissionAbort = undefined;
-                entry.admissionLease?.release();
-                entry.admissionLease = undefined;
+                // A cancelled attempt can reject after another send has
+                // already reserved this entry. Only clear our own attempt.
+                if (
+                  !admissionAbort ||
+                  entry.admissionAbort === admissionAbort ||
+                  (restartLease !== undefined &&
+                    entry.admissionLease === restartLease)
+                ) {
+                  entry.restarting = false;
+                  entry.admissionAbort = undefined;
+                }
+                admissionAbort?.abort();
+                if (entry.admissionLease === restartLease)
+                  entry.admissionLease = undefined;
+                restartLease?.release();
                 notify(entry.snapshot.id);
               }),
             ),
