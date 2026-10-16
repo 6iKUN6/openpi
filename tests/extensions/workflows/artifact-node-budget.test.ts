@@ -291,3 +291,42 @@ test("transcriptsOmitted surfaces through the completion display projection", ()
   );
   assert.match(entry.expanded, /omitted from transcripts\.json/);
 });
+
+test("FAIL: rebuilding transcripts.json does not re-encode agents whose transcript is unchanged", () => {
+  let reads = 0;
+  const counted = (entries: TranscriptEntry[]) =>
+    entries.map(
+      (entry) =>
+        new Proxy(entry, {
+          get(target, property, receiver) {
+            if (property === "text") reads++;
+            return Reflect.get(target, property, receiver);
+          },
+        }),
+    );
+  const agents = Array.from({ length: 40 }, (_, index) =>
+    agent(index, counted(transcript(8))),
+  );
+  const first = boundedTranscriptsArtifact(agents);
+  assert.ok(reads > 0);
+
+  // Live progress replaces one child's array; the others keep theirs.
+  reads = 0;
+  agents[0]!.transcript = [
+    ...transcript(8),
+    { role: "assistant", text: "next step" },
+  ];
+  const second = boundedTranscriptsArtifact(agents);
+  assert.equal(reads, 0, "finished agents were not re-read");
+  assert.notEqual(second.content, first.content);
+
+  // The cached result is byte-identical to encoding fresh copies.
+  const fresh = boundedTranscriptsArtifact(
+    agents.map((item) => ({
+      index: item.index,
+      transcript: item.transcript.map((entry) => ({ ...entry })),
+    })),
+  );
+  assert.equal(second.content, fresh.content);
+  assert.deepEqual(second.omitted, fresh.omitted);
+});
