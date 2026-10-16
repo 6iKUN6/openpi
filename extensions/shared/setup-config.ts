@@ -12,6 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
@@ -122,6 +123,7 @@ export const WEB_APPEARANCE_PALETTES = [
   "pine",
 ] as const;
 export const WEB_APPEARANCE_FONTS = [
+  "codex",
   "system",
   "sans",
   "serif",
@@ -141,15 +143,15 @@ export const DEFAULT_WEB_APPEARANCE: WebAppearancePreference = {
   accent: "",
   background: "",
   foreground: "",
-  font: "system",
+  font: "codex",
 };
 
 export const DEFAULT_WEB_CHAT_WIDTH = 820;
 export const MIN_WEB_CHAT_WIDTH = 820;
 export const MAX_WEB_CHAT_WIDTH = 2_000;
-export const DEFAULT_WEB_SIDEBAR_WIDTH = 280;
+export const DEFAULT_WEB_SIDEBAR_WIDTH = 340;
 export const MIN_WEB_SIDEBAR_WIDTH = 220;
-export const MAX_WEB_SIDEBAR_WIDTH = 420;
+export const MAX_WEB_SIDEBAR_WIDTH = 520;
 export const DEFAULT_WEB_AUXILIARY_WIDTH = 520;
 export const MIN_WEB_AUXILIARY_WIDTH = 360;
 export const MAX_WEB_AUXILIARY_WIDTH = 720;
@@ -267,6 +269,9 @@ export interface MyPiSetupConfig {
     readonly webExpandThinking: boolean;
     readonly webHiddenThinkingLevels: readonly ReasoningLevel[];
     readonly webPinnedSort: "manual" | "updated";
+    readonly webSidebarGrouping: "project" | "list";
+    readonly webChatsSort: "manual" | "updated";
+    readonly webProjectsInRecents: boolean;
     readonly showHeader: boolean;
     readonly customFooter: boolean;
     readonly footerStyle: FooterStyle;
@@ -316,6 +321,9 @@ export const DEFAULT_SETUP_CONFIG: MyPiSetupConfig = {
     webExpandThinking: false,
     webHiddenThinkingLevels: [],
     webPinnedSort: "manual",
+    webSidebarGrouping: "project",
+    webChatsSort: "updated",
+    webProjectsInRecents: true,
     showHeader: false,
     customFooter: true,
     footerStyle: DEFAULT_FOOTER_STYLE,
@@ -724,9 +732,18 @@ export function parseSetupConfig(value: unknown): MyPiSetupConfig {
     ui: {
       webTheme: isWebTheme(ui.webTheme) ? ui.webTheme : "system",
       webAppearance: isWebAppearancePreference(ui.webAppearance)
-        ? { ...ui.webAppearance }
+        ? {
+            ...ui.webAppearance,
+            font:
+              ui.webAppearance.font === "system"
+                ? "codex"
+                : ui.webAppearance.font,
+          }
         : { ...DEFAULT_WEB_APPEARANCE },
       webPinnedSort: ui.webPinnedSort === "updated" ? "updated" : "manual",
+      webSidebarGrouping: ui.webSidebarGrouping === "list" ? "list" : "project",
+      webChatsSort: ui.webChatsSort === "manual" ? "manual" : "updated",
+      webProjectsInRecents: ui.webProjectsInRecents !== false,
       webChatWidth: boundedIntegerRange(
         ui.webChatWidth,
         DEFAULT_WEB_CHAT_WIDTH,
@@ -871,6 +888,9 @@ const setupShape: ConfigShape = {
     webExpandThinking: booleanValue,
     webHiddenThinkingLevels: isHiddenThinkingLevels,
     webPinnedSort: (value) => value === "manual" || value === "updated",
+    webSidebarGrouping: (value) => value === "project" || value === "list",
+    webChatsSort: (value) => value === "manual" || value === "updated",
+    webProjectsInRecents: booleanValue,
     showHeader: booleanValue,
     customFooter: booleanValue,
     footerStyle: isFooterStyle,
@@ -997,7 +1017,11 @@ export function inspectSetupConfig() {
   let diagnostics: SetupDiagnostic[] = [];
   let source: "missing" | "disk" = "disk";
   try {
-    bytes = readFileSync(SETUP_CONFIG_PATH, "utf8");
+    // Reject malformed bytes before replacement decoding can hide corruption.
+    // Retain a BOM so JSON parsing keeps its existing rejection semantics.
+    bytes = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      readFileSync(SETUP_CONFIG_PATH),
+    );
     try {
       raw = JSON.parse(bytes);
       diagnostics = inspectDocument(raw);
@@ -1174,8 +1198,68 @@ const sameOwner = (left: LockOwner, right: LockOwner) =>
 const sameFile = (left: Stats, right: Stats) =>
   left.dev === right.dev && left.ino === right.ino;
 
-const parsePowerShellProcessStartedAt = (stdout: string) => {
-  const startedAt = Number(stdout.trim());
+// CIM datetime is local time plus a UTC offset in minutes. Truncate the
+// microsecond field so the integer matches FILETIME / ToUnixTimeMilliseconds.
+const CIM_PROCESS_STARTED_AT =
+  /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-])(\d{3})$/;
+
+// Redirected cscript writes UTF-16 LE, often with a BOM. Reading that
+// pipe as UTF-8 leaves NULs or U+FFFD and the CIM parser rejects it, so
+// a live PID stays unknown until the 5s lock expires.
+export function decodeProcessStartedAtOutput(output: Buffer | string) {
+  const buffer = Buffer.isBuffer(output) ? output : Buffer.from(output);
+  const utf16 =
+    (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) ||
+    (buffer.length >= 4 && buffer[1] === 0 && buffer[3] === 0);
+  const text = utf16 ? buffer.toString("utf16le") : buffer.toString("utf8");
+  return text
+    .replace(/^\uFEFF/, "")
+    .replaceAll("\0", "")
+    .trim();
+}
+
+const parseCimProcessStartedAt = (stdout: string) => {
+  const match = CIM_PROCESS_STARTED_AT.exec(stdout.trim());
+  if (!match) return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const millisecond = Number(match[7]?.slice(0, 3));
+  const offsetMinutes = (match[8] === "+" ? 1 : -1) * Number(match[9]);
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31 ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    !Number.isInteger(offsetMinutes)
+  ) {
+    return undefined;
+  }
+  const localAsUtc = Date.UTC(
+    year,
+    month - 1,
+    day,
+    hour,
+    minute,
+    second,
+    millisecond,
+  );
+  if (!Number.isFinite(localAsUtc)) return undefined;
+  const parsed = new Date(localAsUtc);
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    return undefined;
+  }
+  const startedAt = localAsUtc - offsetMinutes * 60_000;
   return isPositiveInteger(startedAt) ? startedAt : undefined;
 };
 
@@ -1189,16 +1273,18 @@ export function processStartedAtQuery(
   platform = process.platform,
 ) {
   if (platform === "win32") {
-    const script = [
-      "$ErrorActionPreference='Stop'",
-      `$p=Get-Process -Id ${pid}`,
-      "[Console]::Out.Write(([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds())",
-    ].join("; ");
+    // Resolve on use. Vitest loads this module without a file URL, so a
+    // top-level fileURLToPath throws during import. WMI via cscript avoids
+    // the PowerShell CLR cold start. The 1s query budget stays; failure is
+    // still unknown ownership, and the 5s lock does not recover.
+    const script = fileURLToPath(
+      new URL("./win32-process-started-at.js", import.meta.url),
+    );
     return {
-      command: "powershell.exe",
-      args: ["-NoProfile", "-NonInteractive", "-Command", script],
+      command: "cscript.exe",
+      args: ["//Nologo", script, String(pid)],
       env: undefined,
-      parseOutput: parsePowerShellProcessStartedAt,
+      parseOutput: parseCimProcessStartedAt,
     };
   }
   return {
@@ -1209,26 +1295,51 @@ export function processStartedAtQuery(
   };
 }
 
-const queryProcessStartedAt = (pid: number) =>
+// One query. A timeout, non-zero exit, or unparseable value is unknown
+// ownership. The 5s lock then expires without a second command.
+const PROCESS_START_QUERY_TIMEOUT_MS = 1_000;
+
+const runProcessStartedAtQuery = (
+  query: {
+    command: string;
+    args: string[];
+    env: Record<string, string> | undefined;
+    parseOutput: (stdout: string) => number | undefined;
+  },
+  timeout: number,
+) =>
   new Promise<number | undefined>((resolve) => {
-    const query = processStartedAtQuery(pid);
     try {
       execFile(
         query.command,
         query.args,
         {
-          encoding: "utf8",
+          encoding: "buffer",
           env: query.env ? { ...process.env, ...query.env } : process.env,
-          timeout: 1_000,
+          timeout,
+          windowsHide: true,
+          // cscript treats //Nologo as a host switch. Verbatim keeps Node
+          // from quoting it into an ordinary argument.
+          windowsVerbatimArguments: process.platform === "win32",
         },
         (error, stdout) => {
-          resolve(error ? undefined : query.parseOutput(stdout));
+          resolve(
+            error || stdout == null
+              ? undefined
+              : query.parseOutput(decodeProcessStartedAtOutput(stdout)),
+          );
         },
       );
     } catch {
       resolve(undefined);
     }
   });
+
+const queryProcessStartedAt = (pid: number) =>
+  runProcessStartedAtQuery(
+    processStartedAtQuery(pid),
+    PROCESS_START_QUERY_TIMEOUT_MS,
+  );
 
 const makeLockIdentity = async (): Promise<LockIdentity> => {
   const processStartedAt = await queryProcessStartedAt(process.pid);
@@ -1600,7 +1711,7 @@ export function formatSetupConfig(config = loadSetupConfig()) {
     config.childExecutions.maxActive === undefined
       ? "Session child executions: unbounded (disabled)"
       : `Session child executions: ${config.childExecutions.maxActive} active slots shared by Workflow, Direct Subagent, and BTW`,
-    `UI: Web theme ${config.ui.webTheme} · palette ${config.ui.webAppearance.palette} · accent ${config.ui.webAppearance.accent || "theme default"} / background ${config.ui.webAppearance.background || "theme default"} / foreground ${config.ui.webAppearance.foreground || "theme default"} · font ${config.ui.webAppearance.font} · chat ${config.ui.webChatWidth}px / ${config.ui.webChatFontSize}px / thinking ${config.ui.webExpandThinking ? "expanded" : "collapsed"} · panes ${config.ui.webSidebarWidth}px / ${config.ui.webAuxiliaryWidth}px · pinned ${config.ui.webPinnedSort} · large header ${config.ui.showHeader ? "on" : "off"} · custom footer ${footer}`,
+    `UI: Web theme ${config.ui.webTheme} · palette ${config.ui.webAppearance.palette} · accent ${config.ui.webAppearance.accent || "theme default"} / background ${config.ui.webAppearance.background || "theme default"} / foreground ${config.ui.webAppearance.foreground || "theme default"} · font ${config.ui.webAppearance.font} · chat ${config.ui.webChatWidth}px / ${config.ui.webChatFontSize}px / thinking ${config.ui.webExpandThinking ? "expanded" : "collapsed"} · panes ${config.ui.webSidebarWidth}px / ${config.ui.webAuxiliaryWidth}px · sidebar ${config.ui.webSidebarGrouping} / chats ${config.ui.webChatsSort} / pinned ${config.ui.webPinnedSort} / projects in recents ${config.ui.webProjectsInRecents ? "on" : "off"} · large header ${config.ui.showHeader ? "on" : "off"} · custom footer ${footer}`,
     `Subagent results: ${config.ui.subagentResultDisplay === "full" ? "full by default" : "compact status summary (Ctrl+O expands full output)"}`,
     `Bash operations: ${config.ui.bashToolDisplay === "full" ? "expanded by default" : "one-line activity summary (Ctrl+O restores native evidence)"}`,
     `Write/Edit operations: ${config.ui.fileMutationDisplay === "full" ? "expanded by default" : "one-line activity summary (Ctrl+O restores native evidence)"}`,
