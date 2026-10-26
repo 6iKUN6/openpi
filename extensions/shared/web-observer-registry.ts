@@ -1,31 +1,26 @@
 import type {
   LiveToolState,
   SubagentSnapshot,
+  SubagentSpend,
   TranscriptItem,
   TranscriptPart,
 } from "../subagents/src/domain.ts";
 import type { ChildExecutionAdmissionSnapshot } from "./child-execution-admission.ts";
 
-export type WebCapabilityKind =
-  | "subagents"
-  | "workflows"
-  | "background-terminals";
+export type WebCapabilityKind = "subagents" | "workflows";
 
 export const WEB_MAX_CAPABILITY_ITEMS = 32;
 const WEB_MAX_ACTIVITY_TEXT = 160;
 const WEB_MAX_WORKFLOW_AGENTS_SCANNED = 1_024;
 const WEB_MAX_CAPABILITY_ID = 160;
-const WEB_MAX_TERMINAL_COMMAND_BYTES = 4 * 1024;
-const WEB_MAX_TERMINAL_CWD_BYTES = 2 * 1024;
-const WEB_MAX_TERMINAL_ERROR_BYTES = 2 * 1024;
-const WEB_MAX_TERMINAL_STDOUT_BYTES = 16 * 1024;
-const WEB_MAX_TERMINAL_STDERR_BYTES = 8 * 1024;
 
 export interface WebSubagentActivity {
   readonly id: string;
   readonly title: string;
+  /** Short assigned input for the task list, never a result or reasoning preview. */
+  readonly taskPreview?: string;
   readonly origin?: "model" | "btw";
-  readonly status: "running" | "done" | "error";
+  readonly status: "running" | "done" | "error" | "unknown";
   readonly outcome?: "completed" | "failed" | "interrupted";
   readonly createdAt: number;
   readonly settledAt?: number;
@@ -35,6 +30,7 @@ export interface WebWorkflowAgentActivity {
   readonly id: string;
   readonly runId: string;
   readonly title: string;
+  readonly taskPreview?: string;
   readonly status: WebSubagentActivity["status"] | "unknown";
   readonly outcome?: WebSubagentActivity["outcome"];
   readonly createdAt: number;
@@ -60,54 +56,20 @@ export interface WebWorkflowActivity {
   readonly children?: WebCapabilityProjection<WebWorkflowAgentActivity>;
 }
 
-export interface WebBackgroundTerminalActivity {
-  readonly id: string;
-  readonly title: string;
-  readonly status: "running" | "done" | "failed" | "killed" | "timed_out";
-  readonly createdAt: number;
-  readonly settledAt?: number;
-  readonly exitCode?: number;
-  readonly signal?: string;
-}
-
-export interface WebBackgroundTerminalOutput {
-  readonly text: string;
-  readonly totalBytes: number;
-  readonly retainedBytes: number;
-  readonly omittedBytes: number;
-  readonly truncated: boolean;
-  readonly recoveryAvailable: boolean;
-}
-
-export interface WebBackgroundTerminalDetail {
-  readonly kind: "background-terminals";
-  readonly id: string;
-  readonly title: string;
-  readonly command: string;
-  readonly cwd: string;
-  readonly pid?: number;
-  readonly status: WebBackgroundTerminalActivity["status"];
-  readonly createdAt: number;
-  readonly settledAt?: number;
-  readonly timeoutAt?: number;
-  readonly exitCode?: number;
-  readonly signal?: string;
-  readonly errorText?: string;
-  readonly stdout: WebBackgroundTerminalOutput;
-  readonly stderr: WebBackgroundTerminalOutput;
-  readonly truncated: boolean;
-}
-
 export interface WebSubagentDetail extends WebSubagentActivity {
   readonly kind: "subagents";
   readonly cwd: string;
   readonly model?: string;
   readonly prompt: string;
-  readonly transcript: readonly TranscriptItem[];
+  readonly transcript: readonly (TranscriptItem & { readonly id?: string })[];
+  /** Presentation identity for the streaming message that will be appended next. */
+  readonly nextEntryId?: string;
   readonly liveAssistant?: { readonly text: string; readonly thinking: string };
   readonly liveTools: readonly LiveToolState[];
   readonly finalText: string;
   readonly errorText?: string;
+  /** Cumulative token spend for the child session. */
+  readonly spend?: SubagentSpend;
   readonly truncated: boolean;
   readonly omittedEntries: number;
 }
@@ -146,10 +108,7 @@ export interface WebCapabilityActionProvider {
   ) => Promise<WebCapabilityDetail>;
 }
 
-export type WebCapabilityDetail =
-  | WebBackgroundTerminalDetail
-  | WebSubagentDetail
-  | WebWorkflowAgentDetail;
+export type WebCapabilityDetail = WebSubagentDetail | WebWorkflowAgentDetail;
 
 export type WebCapabilityDetailReceipt =
   | { readonly status: "found"; readonly detail: WebCapabilityDetail }
@@ -158,10 +117,7 @@ export type WebCapabilityDetailReceipt =
   | { readonly status: "unavailable" };
 
 export interface WebCapabilityProjection<
-  Item =
-    | WebSubagentActivity
-    | WebWorkflowActivity
-    | WebBackgroundTerminalActivity,
+  Item = WebSubagentActivity | WebWorkflowActivity,
 > {
   readonly items: readonly Item[];
   readonly omitted: number;
@@ -174,7 +130,6 @@ export interface WebCapabilityProjection<
 export interface WebCapabilitySnapshot {
   readonly subagents?: WebCapabilityProjection<WebSubagentActivity>;
   readonly workflows?: WebCapabilityProjection<WebWorkflowActivity>;
-  readonly "background-terminals"?: WebCapabilityProjection<WebBackgroundTerminalActivity>;
 }
 
 export interface WebCapabilityProvider {
@@ -189,15 +144,18 @@ interface BoundedActivityText {
   readonly truncated: boolean;
 }
 
-function boundedActivityText(value: string): BoundedActivityText {
+function boundedActivityText(
+  value: string,
+  limit = WEB_MAX_ACTIVITY_TEXT,
+): BoundedActivityText {
   // Cut on code points: a UTF-16 unit cut can split a surrogate pair and emit a
   // lone surrogate, which the JSON capability snapshot cannot represent.
   const characters = [...value];
-  if (characters.length <= WEB_MAX_ACTIVITY_TEXT) {
+  if (characters.length <= limit) {
     return { value, truncated: false };
   }
   return {
-    value: `${characters.slice(0, WEB_MAX_ACTIVITY_TEXT - 1).join("")}…`,
+    value: `${characters.slice(0, limit - 1).join("")}…`,
     truncated: true,
   };
 }
@@ -222,30 +180,6 @@ function boundedUtf8Tail(value: string, maxBytes: number): BoundedUtf8Text {
     value: new TextDecoder().decode(retained),
     bytes: retained.byteLength,
     truncated: true,
-  };
-}
-
-function projectTerminalOutput(
-  source: {
-    readonly modelSafeText: string;
-    readonly totalBytes: number;
-    readonly truncatedBytes: number;
-    readonly spillPath?: string;
-  },
-  maxBytes: number,
-): WebBackgroundTerminalOutput {
-  const text = boundedUtf8Tail(source.modelSafeText, maxBytes);
-  const omittedBytes = Math.max(
-    source.truncatedBytes,
-    source.totalBytes - text.bytes,
-  );
-  return {
-    text: text.value,
-    totalBytes: source.totalBytes,
-    retainedBytes: text.bytes,
-    omittedBytes,
-    truncated: text.truncated || source.truncatedBytes > 0,
-    recoveryAvailable: source.spillPath !== undefined,
   };
 }
 
@@ -307,6 +241,7 @@ export function projectSubagentCapability(
   source: readonly {
     readonly id: string;
     readonly title: string;
+    readonly prompt?: string;
     readonly origin?: WebSubagentActivity["origin"];
     readonly status: WebSubagentActivity["status"];
     readonly outcome?: WebSubagentActivity["outcome"];
@@ -318,10 +253,14 @@ export function projectSubagentCapability(
   const projection = boundedActivityProjection(source, (value) => {
     const id = boundedActivityText(value.id);
     const title = boundedActivityText(value.title);
+    const task = value.prompt
+      ? boundedActivityText(value.prompt.replace(/\s+/gu, " ").trim(), 96)
+      : undefined;
     return {
       item: {
         id: id.value,
         title: title.value,
+        ...(task?.value ? { taskPreview: task.value } : {}),
         ...(value.origin ? { origin: value.origin } : {}),
         status: value.status,
         ...(value.outcome ? { outcome: value.outcome } : {}),
@@ -330,7 +269,7 @@ export function projectSubagentCapability(
           ? { settledAt: value.settledAt }
           : {}),
       },
-      truncated: id.truncated || title.truncated,
+      truncated: id.truncated || title.truncated || Boolean(task?.truncated),
     };
   });
   return {
@@ -345,7 +284,10 @@ export function projectSubagentDetail(
 ): WebSubagentDetail {
   return {
     kind: "subagents",
-    ...boundedAgentDetail({ ...source, model: source.meta.modelLabel }),
+    ...boundedAgentDetail(
+      { ...source, model: source.meta.modelLabel },
+      Math.max(0, source.transcriptVersion - source.transcript.length),
+    ),
   };
 }
 
@@ -354,6 +296,7 @@ function boundedAgentDetail<Status extends WebWorkflowAgentActivity["status"]>(
     WebSubagentDetail,
     "kind" | "status" | "truncated" | "omittedEntries"
   > & { readonly status: Status },
+  transcriptOffset = 0,
 ) {
   let remainingBytes = 64 * 1024;
   let truncated = false;
@@ -414,16 +357,18 @@ function boundedAgentDetail<Status extends WebWorkflowAgentActivity["status"]>(
   });
   // Spend the remaining budget on recent activity first, then restore chronology.
   const selected = source.transcript.slice(-64);
-  const transcript: TranscriptItem[] = selected
+  const transcript = selected
     .reverse()
-    .flatMap((item): TranscriptItem[] => {
+    .flatMap((item, index): WebSubagentDetail["transcript"][number][] => {
+      const id = `entry-${transcriptOffset + source.transcript.length - 1 - index}`;
       if (item.kind === "user")
-        return [{ kind: "user", text: text(item.text) }];
+        return [{ id, kind: "user", text: text(item.text) }];
       if (item.kind === "toolResult") {
         const toolId = toolIdentity(item.toolId);
         if (toolId === undefined) return [];
         return [
           {
+            id,
             kind: "toolResult",
             toolId,
             name: text(item.name, 640),
@@ -462,7 +407,7 @@ function boundedAgentDetail<Status extends WebWorkflowAgentActivity["status"]>(
           ];
         return [{ type: "text", text: text(part.text) }];
       });
-      return [{ kind: "assistant", parts }];
+      return [{ id, kind: "assistant", parts }];
     })
     .reverse();
   const omittedEntries = source.transcript.length - transcript.length;
@@ -478,10 +423,12 @@ function boundedAgentDetail<Status extends WebWorkflowAgentActivity["status"]>(
     ...(model !== undefined ? { model } : {}),
     prompt,
     transcript,
+    nextEntryId: `entry-${transcriptOffset + source.transcript.length}`,
     ...(liveAssistant ? { liveAssistant } : {}),
     liveTools,
     finalText,
     ...(errorText !== undefined ? { errorText } : {}),
+    ...(source.spend !== undefined ? { spend: source.spend } : {}),
     truncated:
       truncated ||
       omittedEntries > 0 ||
@@ -499,6 +446,11 @@ interface WorkflowAgentSource {
   readonly executionOutcome?: string;
   readonly completion?: { readonly observed: { readonly outcome: string } };
   readonly replayed?: boolean;
+  readonly transcript?: readonly {
+    readonly role?: string;
+    readonly kind?: string;
+    readonly text?: string;
+  }[];
 }
 
 function workflowAgentStatus(source: WorkflowAgentSource) {
@@ -529,6 +481,10 @@ function workflowAgentActivity(runId: string, source: WorkflowAgentSource) {
   )
     return undefined;
   const title = boundedActivityText(source.label ?? `Agent ${source.index}`);
+  const input = source.transcript?.find((entry) => entry.role === "user")?.text;
+  const task = input
+    ? boundedActivityText(input.replace(/\s+/gu, " ").trim(), 96)
+    : undefined;
   const status = workflowAgentStatus(source);
   const outcome =
     status === "done"
@@ -543,6 +499,7 @@ function workflowAgentActivity(runId: string, source: WorkflowAgentSource) {
     id,
     runId,
     title: title.value,
+    ...(task?.value ? { taskPreview: task.value } : {}),
     status,
     ...(outcome ? { outcome } : {}),
     createdAt: source.startedAt ?? 0,
@@ -551,7 +508,7 @@ function workflowAgentActivity(runId: string, source: WorkflowAgentSource) {
       : {}),
     ...(source.replayed !== undefined ? { replayed: source.replayed } : {}),
   };
-  return { item, truncated: title.truncated };
+  return { item, truncated: title.truncated || Boolean(task?.truncated) };
 }
 
 /** Read-only projection of existing owner evidence, never a preview as a result. */
@@ -674,109 +631,6 @@ export function projectWorkflowCapability(
         children.truncated,
     };
   });
-}
-
-export function projectBackgroundTerminalCapability(
-  source: readonly {
-    readonly id: string;
-    readonly title: string;
-    readonly status: WebBackgroundTerminalActivity["status"];
-    readonly createdAt: number;
-    readonly settledAt?: number;
-    readonly exitCode?: number;
-    readonly signal?: string;
-  }[],
-): WebCapabilityProjection<WebBackgroundTerminalActivity> {
-  return boundedActivityProjection(source, (value) => {
-    const id = boundedActivityText(value.id);
-    const title = boundedActivityText(value.title);
-    const signal = value.signal ? boundedActivityText(value.signal) : undefined;
-    return {
-      item: {
-        id: id.value,
-        title: title.value,
-        status: value.status,
-        createdAt: value.createdAt,
-        ...(value.settledAt !== undefined
-          ? { settledAt: value.settledAt }
-          : {}),
-        ...(value.exitCode !== undefined ? { exitCode: value.exitCode } : {}),
-        ...(signal ? { signal: signal.value } : {}),
-      },
-      truncated: id.truncated || title.truncated || signal?.truncated === true,
-    };
-  });
-}
-
-export function projectBackgroundTerminalDetail(source: {
-  readonly id: string;
-  readonly title: string;
-  readonly command: string;
-  readonly cwd: string;
-  readonly pid?: number;
-  readonly status: WebBackgroundTerminalActivity["status"];
-  readonly createdAt: number;
-  readonly settledAt?: number;
-  readonly timeoutAt?: number;
-  readonly exitCode?: number;
-  readonly signal?: string;
-  readonly errorText?: string;
-  readonly stdout: {
-    readonly modelSafeText: string;
-    readonly totalBytes: number;
-    readonly truncatedBytes: number;
-    readonly spillPath?: string;
-  };
-  readonly stderr: {
-    readonly modelSafeText: string;
-    readonly totalBytes: number;
-    readonly truncatedBytes: number;
-    readonly spillPath?: string;
-  };
-}): WebBackgroundTerminalDetail {
-  const title = boundedActivityText(source.title);
-  const command = boundedUtf8Tail(
-    source.command,
-    WEB_MAX_TERMINAL_COMMAND_BYTES,
-  );
-  const cwd = boundedUtf8Tail(source.cwd, WEB_MAX_TERMINAL_CWD_BYTES);
-  const signal = source.signal ? boundedActivityText(source.signal) : undefined;
-  const errorText = source.errorText
-    ? boundedUtf8Tail(source.errorText, WEB_MAX_TERMINAL_ERROR_BYTES)
-    : undefined;
-  const stdout = projectTerminalOutput(
-    source.stdout,
-    WEB_MAX_TERMINAL_STDOUT_BYTES,
-  );
-  const stderr = projectTerminalOutput(
-    source.stderr,
-    WEB_MAX_TERMINAL_STDERR_BYTES,
-  );
-  return {
-    kind: "background-terminals",
-    id: source.id,
-    title: title.value,
-    command: command.value,
-    cwd: cwd.value,
-    ...(source.pid !== undefined ? { pid: source.pid } : {}),
-    status: source.status,
-    createdAt: source.createdAt,
-    ...(source.settledAt !== undefined ? { settledAt: source.settledAt } : {}),
-    ...(source.timeoutAt !== undefined ? { timeoutAt: source.timeoutAt } : {}),
-    ...(source.exitCode !== undefined ? { exitCode: source.exitCode } : {}),
-    ...(signal ? { signal: signal.value } : {}),
-    ...(errorText ? { errorText: errorText.value } : {}),
-    stdout,
-    stderr,
-    truncated:
-      title.truncated ||
-      command.truncated ||
-      cwd.truncated ||
-      signal?.truncated === true ||
-      errorText?.truncated === true ||
-      stdout.truncated ||
-      stderr.truncated,
-  };
 }
 
 /** The Pi SessionManager object itself is the capability-lifetime identity. */

@@ -26,6 +26,17 @@ if (!token) throw new Error("OPENPI_WEB_E2E_TOKEN is required");
 
 const authenticatedPath = "/";
 
+// route.fetch() keeps the upstream body on the per-test request context.
+// Closing that context ("Test ended") drops the body, so a snapshot refresh
+// still between fetch() and json() rejects a finished test with
+// "Response has been disposed". Drain handlers before fixture teardown.
+// A handler that fails for any other reason still fails the test. Tests that
+// already closed the fixture page have finished their own handlers.
+test.afterEach(async ({ page }) => {
+  if (page.isClosed()) return;
+  await page.unrouteAll({ behavior: "wait" });
+});
+
 for (const firstControl of ["settings", "thinking"] as const) {
   test(`first-use ${firstControl} works before sending a message and preserves the draft`, async ({
     page,
@@ -641,10 +652,20 @@ async function dragPane(page: Page, side: "left" | "right", deltaX: number) {
 }
 
 async function openWorkbarTool(page: Page, name: string) {
-  await page
-    .locator('button.task-tools-trigger[aria-label="打开工具"]')
-    .click();
+  const trigger = page.locator(
+    'button.task-tools-trigger[aria-label="打开工具"]',
+  );
+  const opensMenu = (await trigger.getAttribute("aria-haspopup")) === "menu";
+  await trigger.click();
   const workbar = page.locator(".workbar-panel");
+  if (opensMenu) {
+    await page
+      .getByRole("menu", { name: "打开工具" })
+      .getByRole("menuitem", { name: new RegExp(`^${name}`, "u") })
+      .click();
+    await expect(workbar).toBeVisible();
+    return workbar;
+  }
   await expect(workbar).toBeVisible();
   const existingTab = workbar
     .locator(".workbar-tab > button:first-child")
@@ -653,7 +674,11 @@ async function openWorkbarTool(page: Page, name: string) {
     await existingTab.click();
   } else {
     await workbar
-      .getByRole("button", { name: new RegExp(`^${name}`, "u") })
+      .getByRole("button", { name: "打开工具", exact: true })
+      .click();
+    await page
+      .getByRole("menu", { name: "打开工具" })
+      .getByRole("menuitem", { name: new RegExp(`^${name}`, "u") })
       .click();
   }
   return workbar;
@@ -668,24 +693,24 @@ test("desktop panes resize by pointer and collapse beyond their thresholds", asy
   const conversation = page.locator(".conversation-shell");
   const sidebarHandle = page.getByRole("separator", { name: "调整侧边栏宽度" });
   await sidebarHandle.press("Enter");
-  await expect(sidebar).toHaveCSS("width", "340px");
+  await expect(sidebar).toHaveCSS("width", "260px");
   await expect(sidebarHandle).toHaveAttribute("aria-valuemin", "220");
   await expect(sidebarHandle).toHaveAttribute("aria-valuemax", "520");
   await sidebarHandle.press("Home");
   await expect(sidebarHandle).toHaveAttribute("aria-valuenow", "220");
   await expect(sidebar).toHaveCSS("width", "220px");
   await sidebarHandle.press("Enter");
-  await expect(sidebar).toHaveCSS("width", "340px");
+  await expect(sidebar).toHaveCSS("width", "260px");
   const initialSidebar = await sidebar.boundingBox();
   const initialConversation = await conversation.boundingBox();
   expect(initialSidebar).not.toBeNull();
   expect(initialConversation).not.toBeNull();
 
   await sidebarHandle.press("ArrowRight");
-  await expect(sidebarHandle).toHaveAttribute("aria-valuenow", "356");
-  await expect(sidebar).toHaveCSS("width", "356px");
+  await expect(sidebarHandle).toHaveAttribute("aria-valuenow", "276");
+  await expect(sidebar).toHaveCSS("width", "276px");
   await sidebarHandle.press("Enter");
-  await expect(sidebar).toHaveCSS("width", "340px");
+  await expect(sidebar).toHaveCSS("width", "260px");
 
   await dragPane(page, "left", 80);
   await expect
@@ -740,11 +765,11 @@ test("left divider follows visible sidebar between desktop breakpoints", async (
   await expect(sidebar).toBeVisible();
   await expect(left).toBeVisible();
   await left.press("Enter");
-  await expect(sidebar).toHaveCSS("width", "340px");
+  await expect(sidebar).toHaveCSS("width", "260px");
   await dragPane(page, "left", 80);
-  await expect(sidebar).toHaveCSS("width", "420px");
+  await expect(sidebar).toHaveCSS("width", "340px");
   await dragPane(page, "left", -60);
-  await expect(sidebar).toHaveCSS("width", "360px");
+  await expect(sidebar).toHaveCSS("width", "280px");
   await page.setViewportSize({ width: 760, height: 900 });
   await expect(sidebar).toBeHidden();
   await expect(left).toHaveCount(0);
@@ -763,13 +788,13 @@ test("left divider still expands after the workbar takes the main view", async (
   const sidebar = page.locator(".session-sidebar");
   const left = page.locator('[data-pane-resizer="left"]');
   await left.press("Enter");
-  await expect(sidebar).toHaveCSS("width", "340px");
+  await expect(sidebar).toHaveCSS("width", "260px");
   const workbar = await openWorkbarTool(page, "文件");
   const right = page.locator('[data-pane-resizer="right"]');
   await right.press("Enter");
   await expect(right).toHaveAttribute("aria-valuenow", "520");
   await right.press("End");
-  await expect(right).toHaveAttribute("aria-valuenow", "660");
+  await expect(right).toHaveAttribute("aria-valuenow", "720");
   await dragPane(page, "right", -100);
   await expect(right).toHaveCount(0);
   await expect(page.locator(".app-shell")).toHaveClass(/center-collapsed/);
@@ -788,7 +813,7 @@ test("left divider still expands after the workbar takes the main view", async (
     ),
   ).toBe("left");
   await dragPane(page, "left", 80);
-  await expect(sidebar).toHaveCSS("width", "420px");
+  await expect(sidebar).toHaveCSS("width", "340px");
   await expect(composer).toHaveValue("keep drafting while resizing");
   expect(
     await composer.evaluate(
@@ -800,19 +825,19 @@ test("left divider still expands after the workbar takes the main view", async (
     (response) =>
       response.url().endsWith("/api/settings/preferences") &&
       response.request().method() === "POST" &&
-      response.request().postDataJSON().sidebarWidth === 360,
+      response.request().postDataJSON().sidebarWidth === 280,
   );
   await dragPane(page, "left", -60);
-  await expect(sidebar).toHaveCSS("width", "360px");
+  await expect(sidebar).toHaveCSS("width", "280px");
   await save;
   await workbar.getByRole("button", { name: "返回聊天", exact: true }).click();
   await expect(right).toHaveCount(1);
   await workbar
     .getByRole("button", { name: "收起工具栏", exact: true })
     .click();
-  await expect(sidebar).toHaveCSS("width", "360px");
+  await expect(sidebar).toHaveCSS("width", "280px");
   await page.reload();
-  await expect(sidebar).toHaveCSS("width", "360px");
+  await expect(sidebar).toHaveCSS("width", "280px");
   await expect(composer).toHaveValue("keep drafting while resizing");
 });
 
@@ -922,7 +947,7 @@ test("side conversation shows one editor in narrow layouts and preserves both dr
   const workbar = await openWorkbarTool(page, "侧边对话");
   const sideInput = workbar.getByPlaceholder("提出一个侧边问题…");
   await sideInput.fill("Keep the side conversation draft");
-  const mainForm = mainInput.locator("..");
+  const mainForm = page.locator("form").filter({ has: mainInput });
   const sideForm = workbar.locator(".side-conversation-composer");
   await page.addStyleTag({
     content: ".composer { transition: none !important; }",
@@ -1013,7 +1038,7 @@ test("side conversation shows one editor in narrow layouts and preserves both dr
   await expect(mainInput).toHaveValue("Keep the main conversation draft");
 });
 
-test("workbar exposes five tools and completes a side conversation lifecycle", async ({
+test("workbar exposes its tools and completes a side conversation lifecycle", async ({
   page,
 }) => {
   await page.route("**/api/snapshot**", async (route) => {
@@ -1095,17 +1120,15 @@ test("workbar exposes five tools and completes a side conversation lifecycle", a
   await page
     .locator('button.task-tools-trigger[aria-label="打开工具"]')
     .click();
+  const toolsMenu = page.getByRole("menu", { name: "打开工具" });
+  await expect(toolsMenu.getByRole("menuitem")).toHaveCount(6);
+  for (const name of ["侧边对话", "变更", "终端", "浏览器", "文件", "来源"]) {
+    await expect(
+      toolsMenu.getByRole("menuitem", { name: new RegExp(`^${name}`, "u") }),
+    ).toBeVisible();
+  }
+  await toolsMenu.getByRole("menuitem", { name: /^变更/u }).click();
   const launcher = page.locator(".workbar-panel");
-  const launcherButtons = launcher.locator(".workbar-launcher-list > button");
-  await expect(launcherButtons).toHaveCount(5);
-  expect(await launcherButtons.locator("strong").allTextContents()).toEqual([
-    "侧边对话",
-    "变更",
-    "终端",
-    "浏览器",
-    "文件",
-  ]);
-  await launcher.getByRole("button", { name: /^变更/u }).click();
   const review = launcher.locator(".review-panel");
   await expect(review).toBeVisible();
   await launcher
@@ -1174,7 +1197,9 @@ test("terminal launcher creates independent real workspace shells and closes onl
   await workbar.locator(".workbar-add-tab").click();
   const launcher = page.getByRole("menu");
   await expect(launcher).toBeVisible();
-  await expect(launcher.getByRole("menuitem")).toHaveCount(5);
+  await expect(
+    launcher.getByRole("menuitem", { name: /^新建终端/u }),
+  ).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath("multi-terminal-launcher.png"),
   });
@@ -1867,7 +1892,7 @@ for (const theme of ["light", "dark"]) {
     const expand = page.getByRole("button", { name: "展开侧边栏" });
     await expect(expand).toBeVisible();
     await expect(create).toBeVisible();
-    await expect(create).toHaveAttribute("title", "新建会话");
+    await expect(create).toHaveAccessibleDescription("新建会话");
     await expect(current).toBeHidden();
     await expect(archived).toBeVisible();
     await expect(
@@ -2036,6 +2061,19 @@ test("discovers and completes Pi commands without submitting unsupported command
   await expect(unavailableOption).toBeDisabled();
   await expect(unavailableOption).toContainText("此扩展命令尚未接入 Web");
   const menu = page.locator(".slash-command-menu");
+  // The entry transition moves the menu; measure its settled placement.
+  await expect
+    .poll(() =>
+      menu.evaluate((element) =>
+        element
+          .getAnimations()
+          .some(
+            (animation) =>
+              animation.pending || animation.playState === "running",
+          ),
+      ),
+    )
+    .toBe(false);
   const menuBox = await menu.boundingBox();
   const composerBox = await page.locator(".composer").boundingBox();
   expect(menuBox).not.toBeNull();
@@ -2145,6 +2183,8 @@ test.describe("touch viewport", () => {
     expect(dialogBox!.x).toBeGreaterThanOrEqual(0);
     expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(390);
     await page.getByRole("button", { name: "取消" }).click();
+    // Native close removes [open] before the discrete exit transition ends.
+    await expect(page.locator("dialog:visible")).toHaveCount(0);
 
     const accessibility = await new AxeBuilder({ page }).analyze();
     expect(accessibility.violations).toEqual([]);
@@ -2187,7 +2227,11 @@ for (const width of [320, 390]) {
       name: "已归档",
       exact: true,
     });
-    const last = sidebar.getByRole("button", { name: "设置", exact: true });
+    const settings = sidebar.getByRole("button", { name: "设置", exact: true });
+    const last = sidebar.getByRole("button", {
+      name: "退出 OpenPI",
+      exact: true,
+    });
     const sessionOptions = sidebar
       .getByRole("button", { name: "会话选项" })
       .last();
@@ -2242,6 +2286,8 @@ for (const width of [320, 390]) {
     await page.keyboard.press("Tab");
     await expect(archived).toBeFocused();
     await page.keyboard.press("Tab");
+    await expect(settings).toBeFocused();
+    await page.keyboard.press("Tab");
     await expect(last).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(first).toBeFocused();
@@ -2276,7 +2322,8 @@ for (const width of [320, 390]) {
     expect(dialogBox?.x).toBeGreaterThanOrEqual(0);
     expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(width);
     await page.keyboard.press("Escape");
-    await expect(dialog).not.toBeVisible();
+    // Closing resets the dialog label before its discrete exit finishes.
+    await expect(page.locator("dialog:visible")).toHaveCount(0);
     await expect(menu).toBeFocused();
     await expect(sidebar).toBeVisible();
     await expect(menu).toHaveCSS("outline-style", "solid");
@@ -2629,7 +2676,7 @@ test("recovers an unknown prompt admission only after an explicit user decision"
   ).toHaveCount(0);
 });
 
-test("inspects session-scoped runtime and terminal details on desktop and mobile", async ({
+test("inspects session-scoped runtime and subagent details on desktop and mobile", async ({
   page,
 }, testInfo) => {
   const sessionId = "inspection-browser-session";
@@ -2674,10 +2721,10 @@ test("inspects session-scoped runtime and terminal details on desktop and mobile
     snapshot.runtime = {
       status: "idle",
       capabilities: {
-        "background-terminals": {
+        subagents: {
           items: [
             {
-              id: "bt-1",
+              id: "sa-1",
               title: "Build logs",
               status: "done",
               createdAt: 1,
@@ -2685,6 +2732,7 @@ test("inspects session-scoped runtime and terminal details on desktop and mobile
             },
           ],
           omitted: 0,
+          truncated: false,
         },
       },
     };
@@ -2747,22 +2795,20 @@ test("inspects session-scoped runtime and terminal details on desktop and mobile
               : {
                   sessionId,
                   detail: {
-                    id: "bt-1",
+                    kind: "subagents",
+                    id: "sa-1",
                     title: "Build logs",
-                    command: "bun run check",
                     cwd: "/inspection",
                     status: "done",
                     createdAt: 1,
-                    exitCode: 0,
-                    stdout: {
-                      text:
-                        '<script>alert("literal output")</script>\n' +
-                        "long output ".repeat(100),
-                      truncated: true,
-                      omittedBytes: 100,
-                    },
-                    stderr: { text: "" },
-                    truncated: true,
+                    prompt:
+                      '<script>alert("literal output")</script>\n' +
+                      "long output ".repeat(100),
+                    transcript: [],
+                    liveTools: [],
+                    finalText: "",
+                    truncated: false,
+                    omittedEntries: 0,
                   },
                 };
       await route.fulfill({ json: body });
@@ -2855,30 +2901,41 @@ test("inspects session-scoped runtime and terminal details on desktop and mobile
     });
     await page.keyboard.press("Escape");
     await expect(providerSettings).not.toBeVisible();
-    await page.getByRole("button", { name: /Build logs/ }).click();
-    await expect(dialog.locator("pre").first()).toContainText(
+    const activities = page.locator(".activity-summary");
+    if (
+      !(await activities.evaluate(
+        (element) => (element as HTMLDetailsElement).open,
+      ))
+    )
+      await activities.locator(":scope > summary").click();
+    await page.getByRole("button", { name: /子代理/ }).click();
+    const subagentPanel = page.getByRole(
+      width <= 640 ? "main" : "complementary",
+      {
+        name: "子代理",
+        exact: true,
+      },
+    );
+    await subagentPanel.getByText("Build logs").click();
+    await subagentPanel.getByText("分配的任务").click();
+    await expect(subagentPanel.locator("pre").first()).toContainText(
       '<script>alert("literal output")</script>',
     );
-    const terminalOutput = dialog.getByRole("region", { name: "标准输出" });
-    await terminalOutput.click();
-    await expect(terminalOutput).toBeFocused();
-    expect(
-      await terminalOutput.evaluate(
-        (element) => element.scrollWidth > element.clientWidth,
-      ),
-    ).toBe(true);
-    await expect(dialog.locator("script")).toHaveCount(0);
-    await expect(dialog).toContainText("已完成");
+    await expect(subagentPanel.locator("script")).toHaveCount(0);
+    await expect(subagentPanel).toContainText("已完成");
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
     await page.screenshot({
-      path: testInfo.outputPath(`terminal-${width}.png`),
+      path: testInfo.outputPath(`subagent-${width}.png`),
       fullPage: true,
     });
-    await page.getByRole("button", { name: "关闭", exact: true }).click();
+    await subagentPanel
+      .getByRole("button", { name: "关闭", exact: true })
+      .click();
+    await expect(subagentPanel).not.toBeVisible();
   }
 });
 
@@ -3192,7 +3249,7 @@ test("trajectory inspects bounded prompt and tool evidence on desktop and mobile
   );
   await expect(view.getByText(/省略 4 条记录/)).toBeVisible();
   await view.getByRole("button", { name: /显示更早记录/ }).click();
-  await expect(view.locator(".trajectory-record")).toHaveCount(57);
+  await expect(view.locator(".trajectory-record")).toHaveCount(58);
   await view.locator(".trajectory-record").filter({ hasText: "bash" }).click();
   await expect(view.locator(".trajectory-inspector")).toContainText(
     "printf hello",
@@ -3279,6 +3336,9 @@ for (const theme of ["light", "dark"] as const) {
             message: {
               role: "assistant",
               content: "",
+              provider: "fixture",
+              model: "fixture-model",
+              usage: { input: 120, cacheRead: 900, cacheWrite: 0, output: 50 },
               parts: [
                 { type: "thinking", text: "先读取配置，再核对检查结果。" },
                 {
@@ -3314,8 +3374,9 @@ for (const theme of ["light", "dark"] as const) {
                 {
                   type: "toolCall",
                   id: "run-checks",
-                  name: "bash",
-                  arguments: '{"command":"bun run check"}',
+                  name: "codemode",
+                  arguments:
+                    '{"code":"text(await tools.bash({command: \'bun run check\'}));"}',
                 },
               ],
             },
@@ -3327,10 +3388,25 @@ for (const theme of ["light", "dark"] as const) {
             message: {
               role: "toolResult",
               toolCallId: "run-checks",
-              toolName: "bash",
+              toolName: "codemode",
               content: "配置与类型检查通过。",
               isError: false,
               details: { exitCode: 0 },
+              nestedCalls: {
+                complete: true,
+                calls: [
+                  {
+                    call: {
+                      type: "toolCall",
+                      id: "run-checks/1",
+                      name: "bash",
+                      arguments: '{"command":"bun run check"}',
+                    },
+                    status: "ok",
+                    durationMs: 1234,
+                  },
+                ],
+              },
             },
           },
           {
@@ -3360,6 +3436,38 @@ for (const theme of ["light", "dark"] as const) {
       exact: true,
     });
     const changes = view.locator(".trajectory-event-group details");
+    await view.locator('[data-record-key="inspect"]').click();
+    await inspector.getByRole("tab", { name: "用量", exact: true }).click();
+    await expect(inspector.getByRole("tabpanel")).toContainText("900");
+    await expect(inspector.getByRole("tabpanel")).toContainText(
+      "fixture-model",
+    );
+    await view.locator('li[data-nested="true"] .trajectory-record').click();
+    await expect(inspector.getByRole("tabpanel")).toContainText(
+      "未保存其结果正文",
+    );
+    await inspector.getByRole("tab", { name: "时间", exact: true }).click();
+    await expect(inspector.getByRole("tabpanel")).toContainText("1.23 s");
+    await expect(inspector.getByRole("tabpanel")).toContainText("未记录");
+    const overview = view.locator(".trajectory-overview svg");
+    const bounds = (await overview.boundingBox())!;
+    await page.mouse.move(
+      bounds.x + bounds.width * 0.35,
+      bounds.y + bounds.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      bounds.x + bounds.width * 0.7,
+      bounds.y + bounds.height / 2,
+    );
+    await page.mouse.up();
+    await expect(view.getByRole("button", { name: "清除选区" })).toBeVisible();
+    await expect(
+      view.locator('li[data-outside-range="true"] > .trajectory-record.user'),
+    ).toBeVisible();
+    await view.getByRole("searchbox", { name: "搜索已加载记录" }).fill("read");
+    await expect(view.getByRole("button", { name: "清除选区" })).toHaveCount(0);
+    await view.getByRole("searchbox", { name: "搜索已加载记录" }).fill("");
     await expect(changes).toHaveJSProperty("open", false);
     await changes.locator("summary").click();
     await view.getByRole("button", { name: /切换模型/ }).click();
@@ -4040,7 +4148,7 @@ test.describe("thinking picker", () => {
     await page.keyboard.press("Escape");
     await expect(
       page.locator('[role="dialog"]:has(.thinking-controls)'),
-    ).toHaveCount(0);
+    ).toBeHidden();
     await expect(picker).toBeFocused();
     expect(fixture.posts).toHaveLength(1);
   });
@@ -4219,7 +4327,7 @@ test.describe("thinking picker", () => {
     await page.mouse.up();
     await expect(
       page.locator('[role="dialog"]:has(.thinking-controls)'),
-    ).toHaveCount(0);
+    ).toBeHidden();
     expect(fixture.posts).toEqual([]);
     await page.locator(".model-picker > button").click();
     await page.mouse.move(bounds.x + 14, y);
@@ -4260,12 +4368,12 @@ test.describe("thinking picker", () => {
     await trigger.click();
     await expect(popup).toBeVisible();
     await trigger.click();
-    await expect(popup).toHaveCount(0);
+    await expect(popup).toBeHidden();
     await trigger.click();
     await expect(popup).toBeVisible();
     const composer = page.getByRole("textbox", { name: "描述任务" });
     await composer.click();
-    await expect(popup).toHaveCount(0);
+    await expect(popup).toBeHidden();
     await expect(composer).toBeFocused();
     await page.keyboard.type("Keep composing");
     await expect(composer).toHaveValue("Keep composing");

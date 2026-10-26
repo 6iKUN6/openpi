@@ -1,5 +1,4 @@
 import type {
-  WebBackgroundTerminalDetail,
   WebCapabilityActionRequest,
   WebSubagentDetail,
   WebWorkflowAgentDetail,
@@ -201,6 +200,12 @@ export class WebClient {
       window.clearTimeout(timer);
       options.signal?.removeEventListener("abort", abort);
     }
+  }
+
+  shutdown() {
+    return this.request<{ accepted: boolean }>("/api/shutdown", {
+      method: "POST",
+    });
   }
 
   snapshot(
@@ -1075,26 +1080,26 @@ export class WebClient {
     });
   }
 
-  terminalDetail(sessionId: string, id: string, signal: AbortSignal) {
-    return this.request<{
-      sessionId: string;
-      detail: WebBackgroundTerminalDetail;
-    }>(
-      `/api/capabilities/detail?kind=background-terminals&id=${encodeURIComponent(id)}&sessionId=${encodeURIComponent(sessionId)}`,
-      { signal },
-    );
-  }
-
-  subagentDetail(sessionId: string, id: string, signal: AbortSignal) {
+  subagentDetail(
+    sessionId: string,
+    id: string,
+    signal: AbortSignal,
+    sessionPath?: string,
+  ) {
     return this.request<{ sessionId: string; detail: WebSubagentDetail }>(
-      `/api/capabilities/detail?kind=subagents&id=${encodeURIComponent(id)}&sessionId=${encodeURIComponent(sessionId)}`,
+      `/api/capabilities/detail?kind=subagents&id=${encodeURIComponent(id)}&sessionId=${encodeURIComponent(sessionId)}${sessionPath ? `&sessionPath=${encodeURIComponent(sessionPath)}` : ""}`,
       { signal },
     );
   }
 
-  workflowAgentDetail(sessionId: string, id: string, signal: AbortSignal) {
+  workflowAgentDetail(
+    sessionId: string,
+    id: string,
+    signal: AbortSignal,
+    sessionPath?: string,
+  ) {
     return this.request<{ sessionId: string; detail: WebWorkflowAgentDetail }>(
-      `/api/capabilities/detail?kind=workflows&id=${encodeURIComponent(id)}&sessionId=${encodeURIComponent(sessionId)}`,
+      `/api/capabilities/detail?kind=workflows&id=${encodeURIComponent(id)}&sessionId=${encodeURIComponent(sessionId)}${sessionPath ? `&sessionPath=${encodeURIComponent(sessionPath)}` : ""}`,
       { signal },
     );
   }

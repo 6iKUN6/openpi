@@ -1,3 +1,5 @@
+import { Tooltip } from "@astryxdesign/core/Tooltip";
+import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import {
   Menu,
   PanelLeftClose,
@@ -64,7 +66,10 @@ import { useBrowserConnector } from "../features/workbar/browser-connector.ts";
 import { useBrowserControl } from "../features/workbar/browser-control.ts";
 import { SessionUsageBar } from "../features/workbar/SessionUsageBar.tsx";
 import type { WorkbarTool } from "../features/workbar/types.ts";
-import { WorkbarPanel } from "../features/workbar/WorkbarPanel.tsx";
+import {
+  launcherTools,
+  WorkbarPanel,
+} from "../features/workbar/WorkbarPanel.tsx";
 import {
   loadWorkbarPositions,
   saveWorkbarPositions,
@@ -75,7 +80,7 @@ import { isControlledSession } from "../lib/session-control.ts";
 import { WebClient } from "../protocol/client.ts";
 import { webStore } from "../store/web-store.ts";
 
-const SIDEBAR_DEFAULT_WIDTH = 340;
+const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 520;
 const SIDEBAR_COLLAPSE_THRESHOLD = 190;
@@ -97,6 +102,8 @@ export function App() {
   const { t } = useTranslation();
   const { actions } = state;
   const sidebarTrigger = useRef<HTMLButtonElement>(null);
+  const workbarTrigger = useRef<HTMLButtonElement>(null);
+  const sidebarExpandTrigger = useRef<HTMLButtonElement>(null);
   const auxiliaryTrigger = useRef<HTMLElement | null>(null);
   const auxiliaryOpen = useRef(false);
   const inspectionFallbackFocus = useRef<HTMLElement | null>(null);
@@ -319,7 +326,7 @@ export function App() {
   }, [subagentVisible]);
   const currentModel = state.snapshot?.models.find((model) => model.current);
   const modelKey = JSON.stringify([currentModel?.provider, currentModel?.id]);
-  const inspect = (terminalId?: string) => {
+  const inspect = () => {
     const snapshot = state.snapshot;
     const session = snapshot?.selectedSession;
     if (
@@ -338,7 +345,6 @@ export function App() {
       cwd: session.cwd,
       model: currentModel?.label ?? "",
       modelKey,
-      terminalId,
     });
   };
   const inspectionVisible =
@@ -607,24 +613,22 @@ export function App() {
       ),
     [selected?.entries],
   );
-  const liveSubagents = controlled
-    ? state.snapshot?.runtime.capabilities.subagents
-    : undefined;
+  const selectedCapabilities = controlled
+    ? (state.snapshot?.runtime.capabilities ?? selected?.capabilities)
+    : selected?.capabilities;
+  const liveSubagents = selectedCapabilities?.subagents;
   const overviewAgents = useMemo(
     () =>
       subagentOverview(
         liveSubagents?.items ?? [],
         savedSubagents,
-        controlled
-          ? state.snapshot?.runtime.capabilities.workflows?.items
-          : undefined,
+        selectedCapabilities?.workflows?.items,
         state.connection === "connected",
       ),
     [
       liveSubagents?.items,
       savedSubagents,
-      controlled,
-      state.snapshot?.runtime.capabilities.workflows?.items,
+      selectedCapabilities?.workflows?.items,
       state.connection,
     ],
   );
@@ -655,7 +659,11 @@ export function App() {
       workbarTarget.sessionId === selected.id &&
       workbarTarget.sessionPath === selected.path,
   );
-  const workbarVisible = workbarOpen && workbarBound && !state.sessionSwitching;
+  const workbarVisible =
+    workbarOpen &&
+    workbarBound &&
+    workbarTarget?.tool !== "launcher" &&
+    !state.sessionSwitching;
   useEffect(() => {
     // Switching only detaches this view. It never cancels a tool or discards
     // its reading position; stale focus must not cross Session identities.
@@ -711,8 +719,11 @@ export function App() {
     setWorkbarOpen(false);
     const trigger = workbarReturnFocus.current;
     workbarReturnFocus.current = null;
+    if (!trigger) return;
     requestAnimationFrame(() => {
-      if (trigger?.isConnected && trigger.checkVisibility()) trigger.focus();
+      // The header switches between a menu trigger and a restore button.
+      const target = trigger.isConnected ? trigger : workbarTrigger.current;
+      if (target?.isConnected && target.checkVisibility()) target.focus();
     });
   };
   const browserScope =
@@ -899,40 +910,58 @@ export function App() {
             actions={actions}
           />
           {state.sidebarCollapsed && (
-            <button
-              className="sidebar-expand"
-              type="button"
-              aria-label={t("expandSidebar")}
-              title={t("expandSidebar")}
-              onClick={() => actions.toggleSidebar(false)}
-            >
-              <PanelLeftOpen />
-            </button>
+            <>
+              <button
+                ref={sidebarExpandTrigger}
+                className="sidebar-expand"
+                type="button"
+                aria-label={t("expandSidebar")}
+                onClick={() => actions.toggleSidebar(false)}
+              >
+                <PanelLeftOpen />
+              </button>
+              <Tooltip
+                anchorRef={sidebarExpandTrigger}
+                content={t("expandSidebar")}
+                placement="end"
+              />
+            </>
           )}
           <main
             inert={mobileSidebarOpen}
             className={`conversation-shell ${selected ? "has-view" : ""} ${landing && (!selected || view === "chat") ? "landing" : ""}`}
           >
             <header className="task-header">
-              <button
-                className="task-header-menu sidebar-shell-toggle"
-                ref={sidebarTrigger}
-                type="button"
-                aria-label={t(
+              <Tooltip
+                content={t(
                   narrow
                     ? "openSidebar"
                     : state.sidebarCollapsed
                       ? "expandSidebar"
                       : "collapseSidebar",
                 )}
-                aria-controls="session-sidebar"
-                aria-expanded={
-                  narrow ? mobileSidebarOpen : !state.sidebarCollapsed
-                }
-                onClick={() => actions.toggleSidebar(narrow)}
+                placement="below"
               >
-                {narrow ? <Menu /> : <PanelLeftClose />}
-              </button>
+                <button
+                  className="task-header-menu sidebar-shell-toggle"
+                  ref={sidebarTrigger}
+                  type="button"
+                  aria-label={t(
+                    narrow
+                      ? "openSidebar"
+                      : state.sidebarCollapsed
+                        ? "expandSidebar"
+                        : "collapseSidebar",
+                  )}
+                  aria-controls="session-sidebar"
+                  aria-expanded={
+                    narrow ? mobileSidebarOpen : !state.sidebarCollapsed
+                  }
+                  onClick={() => actions.toggleSidebar(narrow)}
+                >
+                  {narrow ? <Menu /> : <PanelLeftClose />}
+                </button>
+              </Tooltip>
               <div className="task-identity">
                 {workspacePath && (
                   <span className="task-workspace" title={workspacePath}>
@@ -957,6 +986,7 @@ export function App() {
                   workspace?.name || (selected && workspaceName(selected.cwd))
                 }
                 sessionId={selected?.id}
+                model={controlled ? currentModel : undefined}
               />
               {selected && !state.sessionSwitching && (
                 <SessionOverview
@@ -966,15 +996,13 @@ export function App() {
                   agents={overviewAgents}
                   omitted={
                     (liveSubagents?.omitted ?? 0) +
-                    (controlled
-                      ? (
-                          state.snapshot?.runtime.capabilities.workflows
-                            ?.items ?? []
-                        ).reduce(
-                          (sum, item) => sum + (item.children?.omitted ?? 0),
-                          0,
-                        )
-                      : 0)
+                    (selectedCapabilities?.workflows?.items ?? []).reduce(
+                      (sum, item) => sum + (item.children?.omitted ?? 0),
+                      0,
+                    )
+                  }
+                  omittedWorkflows={
+                    selectedCapabilities?.workflows?.omitted ?? 0
                   }
                   review={gitReview.result}
                   reviewLoading={gitReview.loading}
@@ -993,32 +1021,76 @@ export function App() {
                   }
                   onSubagents={() => inspectSubagent()}
                   onReview={() => openWorkbar("review")}
+                  onSources={() => openWorkbar("sources")}
                 />
               )}
-              <button
-                type="button"
-                className="task-tools-trigger"
-                aria-label={t("openTools")}
-                title={t("openTools")}
-                disabled={!selected || state.sessionSwitching}
-                onClick={(event) => {
-                  if (artifactPanelOpen)
-                    artifactProvider.current?.close({ restoreFocus: false });
-                  workbarReturnFocus.current = event.currentTarget;
-                  if (workbarBound && !workbarVisible) setWorkbarOpen(true);
-                  else openWorkbar("launcher");
-                }}
+              {workbarBound &&
+              !workbarVisible &&
+              workbarTarget?.tool !== "launcher" ? (
+                <Tooltip
+                  content={t(selected ? "openTools" : "openToolsUnavailable")}
+                  placement="below"
+                >
+                  <button
+                    type="button"
+                    ref={workbarTrigger}
+                    className="task-tools-trigger"
+                    aria-label={t("openTools")}
+                    disabled={!selected || state.sessionSwitching}
+                    onClick={(event) => {
+                      if (artifactPanelOpen)
+                        artifactProvider.current?.close({
+                          restoreFocus: false,
+                        });
+                      workbarReturnFocus.current = event.currentTarget;
+                      setWorkbarOpen(true);
+                    }}
+                  >
+                    <PanelRight aria-hidden="true" />
+                  </button>
+                </Tooltip>
+              ) : (
+                <DropdownMenu
+                  button={{
+                    ref: workbarTrigger,
+                    className: "task-tools-trigger",
+                    label: t("openTools"),
+                    "aria-label": t("openTools"),
+                    icon: <PanelRight aria-hidden="true" />,
+                    isIconOnly: true,
+                    isDisabled: !selected || state.sessionSwitching,
+                    variant: "ghost",
+                    tooltip: t(selected ? "openTools" : "openToolsUnavailable"),
+                  }}
+                  items={launcherTools.map((tool) => ({
+                    id: tool.kind,
+                    icon: <tool.icon aria-hidden="true" />,
+                    label: t(tool.title),
+                    description: t(tool.description),
+                    onClick: () => {
+                      openWorkbar(tool.kind);
+                      workbarReturnFocus.current = workbarTrigger.current;
+                    },
+                  }))}
+                  menuWidth="min(300px, calc(100vw - 24px))"
+                  alignment="end"
+                  hasChevron={false}
+                />
+              )}
+              <span
+                className={`connection-state ${state.connection}`}
+                role="status"
+                title={t(state.connection)}
+                aria-label={t(state.connection)}
               >
-                <PanelRight aria-hidden="true" />
-              </button>
-              <span className={`connection-state ${state.connection}`}>
-                {t(state.connection)}
+                <span>{t(state.connection)}</span>
               </span>
             </header>
             {selected && !state.sessionSwitching && (
               <div className="conversation-view-row">
                 <fieldset
                   className="conversation-view-switch"
+                  data-view={view}
                   aria-label={t("conversationView")}
                 >
                   <button
@@ -1290,19 +1362,21 @@ export function App() {
                     ? state.notice
                     : state.notice.message}
                 </span>
-                <button
-                  type="button"
-                  aria-label={t("close")}
-                  onClick={actions.clearNotice}
-                >
-                  <X />
-                </button>
+                <Tooltip content={t("close")} placement="below">
+                  <button
+                    type="button"
+                    aria-label={t("close")}
+                    onClick={actions.clearNotice}
+                  >
+                    <X />
+                  </button>
+                </Tooltip>
               </div>
             )}
           </main>
           {inspectionVisible && (
             <InspectionPanel
-              key={`${inspection.sessionId}:${inspection.sessionPath}:${inspection.terminalId ?? "status"}`}
+              key={`${inspection.sessionId}:${inspection.sessionPath}`}
               target={inspection}
               onClose={closeInspection}
               onOpenProviders={() => void openProviderSettings("credentials")}
@@ -1312,27 +1386,17 @@ export function App() {
             <SubagentPanel
               key={`${subagentTarget.sessionId}:${subagentTarget.navigation}`}
               sessionId={subagentTarget.sessionId}
+              sessionPath={subagentTarget.sessionPath}
               initialId={subagentTarget.id}
               initialKind={subagentTarget.kind}
               observed={state.connection === "connected"}
-              activity={
-                isControlledSession(state.snapshot, {
-                  id: subagentTarget.sessionId,
-                  path: subagentTarget.sessionPath,
-                })
-                  ? state.snapshot?.runtime.capabilities.subagents
-                  : undefined
-              }
+              activity={liveSubagents}
               records={savedSubagents}
-              workflows={
-                controlled
-                  ? state.snapshot?.runtime.capabilities.workflows
-                  : undefined
+              workflows={selectedCapabilities?.workflows}
+              liveAvailable={
+                selected?.id === subagentTarget.sessionId &&
+                selected.path === subagentTarget.sessionPath
               }
-              liveAvailable={isControlledSession(state.snapshot, {
-                id: subagentTarget.sessionId,
-                path: subagentTarget.sessionPath,
-              })}
               onClose={() => setSubagentTarget(null)}
             />
           )}

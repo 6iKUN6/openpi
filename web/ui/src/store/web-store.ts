@@ -1,6 +1,7 @@
 import { createStore } from "zustand/vanilla";
 import { reduceLiveTools } from "../../../protocol/live-tools.ts";
 import {
+  WEB_MAX_ENTRIES,
   WEB_PROMPT_MAX_TEXT_LENGTH,
   type WebCommandSummary,
   type WebEvent,
@@ -13,18 +14,19 @@ import {
   type WebSettingsPreferencesPatch,
   type WebSidebarPinTarget,
   type WebSnapshot,
-  type WebThinkingState,
 } from "../../../protocol/types.ts";
 import type {
-  WebWorktreeReleaseTarget,
-  WebWorktreeReleaseResult,
   WebSessionForkRequest,
+  WebSessionExecution,
+  WebWorktreeReleaseResult,
+  WebWorktreeReleaseTarget,
 } from "../../../runtime/types.ts";
 import { i18n } from "../i18n.ts";
 import { sessionTitle } from "../lib/format.ts";
 import { isControlledSession } from "../lib/session-control.ts";
 import { WebApiError, WebClient } from "../protocol/client.ts";
 import { consumeEventStream } from "../protocol/event-stream.ts";
+import { createThinkingCoordinator } from "./thinking-coordinator.ts";
 
 const collapsedWorkspacesStorageKey = "openpi.collapsed-workspaces";
 const sidebarCollapsedStorageKey = "openpi.sidebar-collapsed";
@@ -118,6 +120,69 @@ function trimLiveMessages(entries: LiveEntry[]) {
     if (entry.optimistic || remaining-- > 0) retained.push(entry);
   }
   return retained.reverse();
+}
+
+/** Completed thinking timings follow the transcript reading window, not the session lifetime. */
+export const THINKING_TIMING_RETENTION_LIMIT = WEB_MAX_ENTRIES * 4;
+
+const EMPTY_THINKING_KEYS: ReadonlySet<string> = new Set();
+const historyThinkingKeysCache = new WeakMap<
+  readonly { id: string; message?: WebLiveMessage }[],
+  ReadonlySet<string>
+>();
+
+function thinkingMessageIdentity(message: WebLiveMessage | undefined) {
+  if (!message) return undefined;
+  if (message.role === "toolResult" && message.toolCallId)
+    return `tool-result-${message.toolCallId}`;
+  if (message.timestamp !== undefined)
+    return `message-${message.role}-${message.timestamp}`;
+  return undefined;
+}
+
+function messageHasThinking(message: WebLiveMessage | undefined) {
+  return message?.parts?.some((part) => part.type === "thinking") === true;
+}
+
+function historyThinkingKeys(
+  entries: readonly { id: string; message?: WebLiveMessage }[] | undefined,
+) {
+  if (!entries) return EMPTY_THINKING_KEYS;
+  const cached = historyThinkingKeysCache.get(entries);
+  if (cached) return cached;
+  const keys = new Set<string>();
+  for (const entry of entries) {
+    if (!messageHasThinking(entry.message)) continue;
+    keys.add(entry.id);
+    const identity = thinkingMessageIdentity(entry.message);
+    if (identity) keys.add(identity);
+  }
+  historyThinkingKeysCache.set(entries, keys);
+  return keys;
+}
+
+function pruneTimingRecord(
+  record: Record<string, number>,
+  keep: ReadonlySet<string>,
+) {
+  for (const key of Object.keys(record)) {
+    if (!keep.has(key)) {
+      const next: Record<string, number> = {};
+      for (const kept of Object.keys(record)) {
+        if (keep.has(kept)) next[kept] = record[kept]!;
+      }
+      return next;
+    }
+  }
+  return record;
+}
+
+function sameLiveKeys(previous: LiveEntry[], next: LiveEntry[]) {
+  if (previous.length !== next.length) return false;
+  for (let index = 0; index < next.length; index++) {
+    if (previous[index]!.key !== next[index]!.key) return false;
+  }
+  return true;
 }
 
 function ownPendingMessages(
@@ -249,7 +314,7 @@ export interface WebStoreState {
   liveMessages: LiveEntry[];
   liveRunning: boolean;
   livePhase: "idle" | "preparing" | "running";
-  liveRetry: { attempt: number; maxAttempts: number } | null;
+  liveRetry: NonNullable<WebSessionExecution["retry"]> | null;
   thinkingStarts: Record<string, number>;
   thinkingDurations: Record<string, number>;
   promptAdmissionPending: boolean;
@@ -455,6 +520,7 @@ export function createWebStore(
   >();
   let snapshotGeneration = 0;
   let liveTurnSequence = 0;
+  let liveRetrySequence = 0;
   let snapshotFailureNotice: string | null = null;
   let promptAdmissionSequence = 0;
   let promptAdmissionToken: number | null = null;
@@ -483,20 +549,17 @@ export function createWebStore(
   let refreshInFlight = false;
   let refreshPending = false;
   let streamController: AbortController | null = null;
+  let streamAttempt: { signal: AbortSignal; connected: boolean } | null = null;
   let modelSearchController: AbortController | null = null;
   let modelSearchGeneration = 0;
-  let thinkingTarget: string | null = null;
-  let thinkingSeq = 0;
-  let thinkingInFlight = false;
-  let thinkingFlushToken = 0;
-  let lastThinkingRevision = 0;
-  let acceptedThinking: WebThinkingState | null = null;
-  let acceptedThinkingEpoch = -1;
   let commandDiscoveryController: AbortController | null = null;
   let commandDiscoveryGeneration = 0;
   let planSelectionGeneration = 0;
   const terminalPromptIds = new Set<string>();
   const completedActivationIds = new Set<string>();
+  let pendingTimingKeys: string[] = [];
+  // Object identity owns one cancellation request, even across retries of a turn.
+  let turnCancellation: WebStoreState["activeTurn"] = null;
 
   const rememberBounded = (set: Set<string>, value: unknown) => {
     if (typeof value !== "string") return;
@@ -507,8 +570,27 @@ export function createWebStore(
     }
   };
 
+  const retainTurnCancellation = (turn: WebStoreState["activeTurn"]) => {
+    if (
+      turnCancellation &&
+      (turn?.sessionId !== turnCancellation.sessionId ||
+        turn.commandId !== turnCancellation.commandId ||
+        turn.epoch !== turnCancellation.epoch ||
+        (turn.sessionPath !== undefined &&
+          turnCancellation.sessionPath !== undefined &&
+          turn.sessionPath !== turnCancellation.sessionPath))
+    ) {
+      turnCancellation = null;
+      return { turnCancellationPending: false };
+    }
+    return {};
+  };
+
   const resetLivePatch = () => {
+    turnCancellation = null;
     planSelectionGeneration++;
+    pendingTimingKeys = [];
+    liveRetrySequence = 0;
     return {
       planSelectionPending: false,
       activeTurn: null,
@@ -523,6 +605,45 @@ export function createWebStore(
       thinkingStarts: {},
       thinkingDurations: {},
     };
+  };
+
+  const retryLivePatch = (
+    sequence: number,
+    retry: WebStoreState["liveRetry"] = null,
+  ) => {
+    liveRetrySequence = sequence;
+    return { liveRetry: retry };
+  };
+
+  const rememberPendingTiming = (key: string) => {
+    const existing = pendingTimingKeys.indexOf(key);
+    if (existing >= 0) pendingTimingKeys.splice(existing, 1);
+    pendingTimingKeys.push(key);
+    while (pendingTimingKeys.length > THINKING_TIMING_RETENTION_LIMIT)
+      pendingTimingKeys.shift();
+  };
+
+  const retainThinkingTiming = (
+    liveMessages: LiveEntry[],
+    entries: readonly { id: string; message?: WebLiveMessage }[] | undefined,
+    thinkingStarts: Record<string, number>,
+    thinkingDurations: Record<string, number>,
+  ) => {
+    const history = historyThinkingKeys(entries);
+    if (pendingTimingKeys.some((key) => history.has(key)))
+      pendingTimingKeys = pendingTimingKeys.filter((key) => !history.has(key));
+    const keep = new Set<string>(history);
+    for (const entry of liveMessages) {
+      keep.add(entry.key);
+      const identity = thinkingMessageIdentity(entry.message);
+      if (identity) keep.add(identity);
+    }
+    for (const key of pendingTimingKeys) keep.add(key);
+    const starts = pruneTimingRecord(thinkingStarts, keep);
+    const durations = pruneTimingRecord(thinkingDurations, keep);
+    if (starts === thinkingStarts && durations === thinkingDurations)
+      return null;
+    return { thinkingStarts: starts, thinkingDurations: durations };
   };
 
   const resetModelSearch = (): { modelSearch: ModelSearchState } => {
@@ -622,8 +743,21 @@ export function createWebStore(
             "Model selection was not confirmed. Please select a model again.",
           );
         }
+        const generation = snapshotGeneration;
+        let refreshed = await get().actions.refreshSnapshot({ epoch });
         if (
-          !(await get().actions.refreshSnapshot({ epoch })) ||
+          !refreshed &&
+          epoch === sessionEpoch &&
+          sessionPath === get().selectedPath &&
+          sessionId === get().snapshot?.selectedSession?.id &&
+          snapshotGeneration > generation + 1
+        ) {
+          // A background refresh can supersede this confirmation without
+          // changing the Session. Recheck once before abandoning its prompt.
+          refreshed = await get().actions.refreshSnapshot({ epoch });
+        }
+        if (
+          !refreshed ||
           epoch !== sessionEpoch ||
           sessionPath !== get().selectedPath ||
           sessionId !== get().snapshot?.selectedSession?.id
@@ -671,152 +805,14 @@ export function createWebStore(
       }, delay);
     };
 
-    // Accepted-value bookkeeping. `acceptedThinking` holds the highest revision
-    // we have confirmed from a snapshot, a POST response, or a local event
-    // patch; anything older is refused so an out-of-order snapshot can never
-    // regress the displayed level. The gate is scoped to the Session epoch so a
-    // session switch (or host restart) cannot carry a stale value forward.
-    const clearThinkingGate = () => {
-      acceptedThinking = null;
-      lastThinkingRevision = 0;
-      acceptedThinkingEpoch = -1;
-    };
-
-    const reconcileSnapshotThinking = () => {
-      const snapshot = get().snapshot;
-      if (!snapshot) return;
-      if (acceptedThinking && acceptedThinkingEpoch !== sessionEpoch) {
-        clearThinkingGate();
-      }
-      const incoming = snapshot.thinking;
-      // An absent projection is authoritative: never resurrect a local value.
-      if (!incoming) return;
-      if (!acceptedThinking || incoming.revision >= lastThinkingRevision) {
-        acceptedThinking = incoming;
-        lastThinkingRevision = incoming.revision;
-        acceptedThinkingEpoch = sessionEpoch;
-        return;
-      }
-      if (incoming !== acceptedThinking) {
-        set({ snapshot: { ...snapshot, thinking: acceptedThinking } });
-      }
-    };
-
-    const acceptThinking = (next?: WebThinkingState) => {
-      if (acceptedThinking && acceptedThinkingEpoch !== sessionEpoch) {
-        clearThinkingGate();
-      }
-      if (next && next.revision >= lastThinkingRevision) {
-        acceptedThinking = next;
-        lastThinkingRevision = next.revision;
-        acceptedThinkingEpoch = sessionEpoch;
-      }
-      reconcileSnapshotThinking();
-    };
-
-    const resetThinking = () => {
-      thinkingTarget = null;
-      thinkingSeq++;
-      thinkingInFlight = false;
-      set({ thinkingPendingLevel: null });
-    };
-
-    const reconcileThinking = async () => {
-      const epoch = sessionEpoch;
-      const sessionId = get().snapshot?.selectedSession?.id;
-      const sessionPath = get().selectedPath;
-      if (!sessionId) return;
-      try {
-        const result = await client.thinking(
-          sessionId,
-          new AbortController().signal,
-        );
-        if (
-          epoch !== sessionEpoch ||
-          sessionPath !== get().selectedPath ||
-          sessionId !== get().snapshot?.selectedSession?.id
-        )
-          return;
-        acceptThinking(result);
-      } catch {
-        // Reconciliation is best-effort; the caller already surfaced the
-        // original failure to the operator.
-      }
-    };
-
-    const flushThinking = async () => {
-      if (thinkingInFlight) return;
-      thinkingInFlight = true;
-      const flushToken = ++thinkingFlushToken;
-      try {
-        while (thinkingTarget !== null) {
-          const target = thinkingTarget;
-          const seq = thinkingSeq;
-          const epoch = sessionEpoch;
-          const sessionId = get().snapshot?.selectedSession?.id;
-          const sessionPath = get().selectedPath;
-          if (
-            !sessionId ||
-            !sessionPath ||
-            sessionId !== get().snapshot?.currentSessionId ||
-            sessionPath !== get().snapshot?.selectedSession?.path ||
-            get().modelSelectionPending
-          ) {
-            resetThinking();
-            return;
-          }
-          if (get().snapshot?.thinking?.level === target) {
-            if (seq === thinkingSeq) {
-              thinkingTarget = null;
-              set({ thinkingPendingLevel: null });
-            }
-            continue;
-          }
-          let result: WebThinkingState;
-          try {
-            result = await client.setThinkingLevel(
-              sessionId,
-              target,
-              sessionPath,
-            );
-          } catch (error) {
-            // A superseded session owns its own flush; drop this one instead of
-            // re-looping into a duplicate POST. Same-epoch newer intent still
-            // re-reads the latest target below.
-            if (epoch !== sessionEpoch || sessionPath !== get().selectedPath)
-              return;
-            if (seq !== thinkingSeq) continue;
-            resetThinking();
-            showError(error);
-            void reconcileThinking();
-            return;
-          }
-          if (
-            epoch !== sessionEpoch ||
-            sessionPath !== get().selectedPath ||
-            sessionId !== get().snapshot?.selectedSession?.id
-          ) {
-            // The session changed underneath this request; a newer flush (if
-            // any) already owns the pending intent. Drop the superseded flush
-            // rather than re-looping and issuing a duplicate POST.
-            return;
-          }
-          if (seq !== thinkingSeq) continue;
-          if (result.level !== target) {
-            resetThinking();
-            showError(new Error(i18n.t("thinkingNotConfirmed")));
-            return;
-          }
-          acceptThinking(result);
-          thinkingTarget = null;
-          set({ thinkingPendingLevel: null });
-          scheduleSnapshotRefresh();
-          return;
-        }
-      } finally {
-        if (flushToken === thinkingFlushToken) thinkingInFlight = false;
-      }
-    };
+    const thinking = createThinkingCoordinator({
+      client,
+      get,
+      set,
+      getEpoch: () => sessionEpoch,
+      showError,
+      scheduleSnapshotRefresh,
+    });
 
     const applyRuntimeEvent = (event: WebEvent) => {
       let current = get();
@@ -941,17 +937,16 @@ export function createWebStore(
       }
 
       if (current.snapshot) {
-        const liveTools = reduceLiveTools(
-          current.snapshot.runtime.liveTools ?? [],
-          event.type,
-          detail,
-        );
-        set({
-          snapshot: {
-            ...current.snapshot,
-            runtime: { ...current.snapshot.runtime, liveTools },
-          },
-        });
+        const stored = current.snapshot.runtime.liveTools ?? [];
+        const liveTools = reduceLiveTools(stored, event.type, detail);
+        if (liveTools !== stored) {
+          set({
+            snapshot: {
+              ...current.snapshot,
+              runtime: { ...current.snapshot.runtime, liveTools },
+            },
+          });
+        }
       }
       if (sessionTransition) {
         const eventCommandId = detail.commandId;
@@ -997,7 +992,7 @@ export function createWebStore(
             current.snapshot?.selectedSession?.path === current.selectedPath
           ) {
             clearCommandDiscovery();
-            resetThinking();
+            thinking.resetPending();
             set({
               ...resetLivePatch(),
               liveMessages: ownPendingMessages(
@@ -1020,7 +1015,7 @@ export function createWebStore(
           }
           clearCommandDiscovery();
           const epoch = ++sessionEpoch;
-          resetThinking();
+          thinking.resetPending();
           promptAdmissionToken = null;
           promptAdmission = null;
           set({
@@ -1054,7 +1049,9 @@ export function createWebStore(
         const settled = terminalPromptIds.has(String(detail.commandId ?? ""));
         set({
           ...promptAcceptedLivePatch(settled, current.livePhase),
-          liveRetry: null,
+          ...(current.livePhase !== "running"
+            ? retryLivePatch(event.sequence)
+            : {}),
           pendingFollowUpsReceipt: Number.isInteger(detail.pendingFollowUps)
             ? Number(detail.pendingFollowUps)
             : current.pendingFollowUpsReceipt,
@@ -1064,38 +1061,41 @@ export function createWebStore(
         });
       } else if (event.type === "turn_started") {
         liveTurnSequence = event.sequence;
+        const activeTurn = {
+          sessionId: String(detail.sessionId),
+          commandId: String(detail.commandId),
+          epoch: Number(detail.epoch),
+          ...(typeof detail.sessionPath === "string"
+            ? { sessionPath: detail.sessionPath }
+            : {}),
+          ...(typeof detail.promptEntryId === "string"
+            ? { promptEntryId: detail.promptEntryId }
+            : {}),
+          ...(typeof detail.startedAt === "number"
+            ? { startedAt: detail.startedAt }
+            : {}),
+          ...(typeof detail.elapsedMs === "number"
+            ? { elapsedMs: detail.elapsedMs }
+            : {}),
+        };
         set({
-          activeTurn: {
-            sessionId: String(detail.sessionId),
-            commandId: String(detail.commandId),
-            epoch: Number(detail.epoch),
-            ...(typeof detail.sessionPath === "string"
-              ? { sessionPath: detail.sessionPath }
-              : {}),
-            ...(typeof detail.promptEntryId === "string"
-              ? { promptEntryId: detail.promptEntryId }
-              : {}),
-            ...(typeof detail.startedAt === "number"
-              ? { startedAt: detail.startedAt }
-              : {}),
-            ...(typeof detail.elapsedMs === "number"
-              ? { elapsedMs: detail.elapsedMs }
-              : {}),
-          },
+          ...retainTurnCancellation(activeTurn),
+          activeTurn,
           liveRunning: true,
           livePhase: "running",
-          liveRetry: null,
+          ...retryLivePatch(event.sequence),
           turnTerminalStatus: null,
         });
       } else if (event.type === "agent_start") {
         liveTurnSequence = event.sequence;
+        const activeTurn = detail.activeTurn as WebStoreState["activeTurn"];
         set({
-          ...(detail.activeTurn
-            ? { activeTurn: detail.activeTurn as WebStoreState["activeTurn"] }
+          ...(activeTurn
+            ? { ...retainTurnCancellation(activeTurn), activeTurn }
             : {}),
           liveRunning: true,
           livePhase: "running",
-          liveRetry: null,
+          ...retryLivePatch(event.sequence),
         });
       } else if (event.type === "turn_settled") {
         rememberBounded(terminalPromptIds, detail.commandId);
@@ -1107,10 +1107,11 @@ export function createWebStore(
         ) {
           liveTurnSequence = event.sequence;
           set({
+            ...retainTurnCancellation(null),
             activeTurn: null,
             liveRunning: false,
             livePhase: "idle",
-            liveRetry: null,
+            ...retryLivePatch(event.sequence),
             turnTerminalStatus:
               typeof detail.outcome === "string" ? detail.outcome : null,
           });
@@ -1120,18 +1121,22 @@ export function createWebStore(
         set({
           pendingFollowUpsReceipt: null,
           pendingSteeringReceipt: null,
+          ...retryLivePatch(event.sequence),
           ...(!current.activeTurn
             ? {
                 liveRunning: false,
                 livePhase: "idle" as const,
-                liveRetry: null,
               }
             : {}),
         });
       } else if (event.type === "prompt_settled") {
         rememberBounded(terminalPromptIds, detail.commandId);
         if (current.livePhase !== "running")
-          set({ liveRunning: false, livePhase: "idle", liveRetry: null });
+          set({
+            liveRunning: false,
+            livePhase: "idle",
+            ...retryLivePatch(event.sequence),
+          });
       } else if (detail.message && typeof detail.message === "object") {
         const message = detail.message as WebLiveMessage;
         let liveMessages = current.liveMessages;
@@ -1147,15 +1152,44 @@ export function createWebStore(
                 entryIndex === index ? live : entry,
               )
             : trimLiveMessages([...liveMessages, live]);
-        const thinkingStarts = { ...current.thinkingStarts };
-        const thinkingDurations = { ...current.thinkingDurations };
+        const liveKeysChanged = !sameLiveKeys(
+          current.liveMessages,
+          liveMessages,
+        );
+        let thinkingStarts = current.thinkingStarts;
+        let thinkingDurations = current.thinkingDurations;
+        let timingChanged = false;
         if (message.parts?.some((part) => part.type === "thinking")) {
-          thinkingStarts[key] ??= Date.now();
+          if (thinkingStarts[key] === undefined) {
+            thinkingStarts = { ...thinkingStarts, [key]: Date.now() };
+            timingChanged = true;
+          }
           if (event.type === "message_end") {
-            thinkingDurations[key] = Date.now() - thinkingStarts[key];
+            const identity = thinkingMessageIdentity(message);
+            const duration = Date.now() - thinkingStarts[key]!;
+            thinkingDurations = { ...thinkingDurations, [key]: duration };
+            if (identity) thinkingDurations[identity] = duration;
+            rememberPendingTiming(identity ?? key);
+            timingChanged = true;
           }
         }
-        set({ liveMessages, thinkingDurations, thinkingStarts });
+        if (timingChanged || liveKeysChanged) {
+          const retained = retainThinkingTiming(
+            liveMessages,
+            current.snapshot?.selectedSession?.entries,
+            thinkingStarts,
+            thinkingDurations,
+          );
+          if (retained) {
+            thinkingStarts = retained.thinkingStarts;
+            thinkingDurations = retained.thinkingDurations;
+            timingChanged = true;
+          }
+        }
+        set({
+          liveMessages,
+          ...(timingChanged ? { thinkingStarts, thinkingDurations } : {}),
+        });
       }
 
       if (
@@ -1184,7 +1218,7 @@ export function createWebStore(
             ? {
                 liveRunning: false,
                 livePhase: "idle" as const,
-                liveRetry: null,
+                ...retryLivePatch(event.sequence),
               }
             : {}),
           notice:
@@ -1192,25 +1226,33 @@ export function createWebStore(
         });
       }
       if (event.type === "auto_retry_start") {
+        liveTurnSequence = event.sequence;
         set({
           liveRunning: true,
           livePhase: "running",
-          liveRetry: {
-            attempt: Number(detail.attempt) || 0,
-            maxAttempts: Number(detail.maxAttempts) || 0,
-          },
+          ...retryLivePatch(event.sequence, {
+            ...(typeof detail.attempt === "number"
+              ? { attempt: detail.attempt }
+              : {}),
+            ...(typeof detail.maxAttempts === "number"
+              ? { maxAttempts: detail.maxAttempts }
+              : {}),
+            ...(typeof detail.errorMessage === "string"
+              ? { errorMessage: detail.errorMessage }
+              : {}),
+          }),
         });
       }
       if (event.type === "auto_retry_end") {
         // A recovered request can continue into tools or another model step.
         // Only Pi's settled event ends the run.
-        set({ liveRetry: null });
+        set(retryLivePatch(event.sequence));
       }
       if (event.type === "thinking_level_changed") {
-        const thinking = get().snapshot?.thinking;
-        if (thinking && typeof detail.level === "string") {
-          acceptThinking({
-            ...thinking,
+        const projection = get().snapshot?.thinking;
+        if (projection && typeof detail.level === "string") {
+          thinking.accept({
+            ...projection,
             level: detail.level,
             revision: event.sequence,
           });
@@ -1234,27 +1276,41 @@ export function createWebStore(
             recoveryAttempted = false;
           }
           if (signal.aborted) return;
-          await consumeEvents({
-            client,
-            cursor: get().cursor ?? 0,
-            onConnected: () => {
-              reconnectDelay = 500;
-              set({ connection: "connected" });
-              if (refreshOnConnect) {
-                refreshOnConnect = false;
-                scheduleSnapshotRefresh(0);
-              }
-            },
-            onEvent: applyRuntimeEvent,
-            onHeartbeat: () => scheduleSnapshotRefresh(0),
-            signal,
-          });
+          const attempt = { signal, connected: false };
+          streamAttempt = attempt;
+          const current = () => streamAttempt === attempt && !signal.aborted;
+          try {
+            await consumeEvents({
+              client,
+              cursor: get().cursor ?? 0,
+              onConnected: () => {
+                if (!current()) return;
+                attempt.connected = true;
+                reconnectDelay = 500;
+                set({ connection: "connected" });
+                if (refreshOnConnect) {
+                  refreshOnConnect = false;
+                  scheduleSnapshotRefresh(0);
+                }
+              },
+              onEvent: (event) => {
+                if (current()) applyRuntimeEvent(event);
+              },
+              onHeartbeat: () => {
+                if (current()) scheduleSnapshotRefresh(0);
+              },
+              signal,
+            });
+          } finally {
+            if (streamAttempt === attempt) streamAttempt = null;
+          }
         } catch (error) {
           if (signal.aborted) return;
           set({ connection: "reconnecting" });
           const recovered =
             !recoveryAttempted &&
             (await get().actions.refreshSnapshot({ resetCursor: true }));
+          if (signal.aborted) return;
           refreshOnConnect = !recovered;
           if (!recovered) set(resetLivePatch());
           await waitForReconnect(reconnectDelay, signal);
@@ -1334,11 +1390,12 @@ export function createWebStore(
         void runEventLoop(streamController.signal);
       },
       stop() {
+        streamAttempt = null;
         streamController?.abort();
         streamController = null;
         if (refreshTimer !== null) window.clearTimeout(refreshTimer);
         refreshTimer = null;
-        resetThinking();
+        thinking.resetPending();
         clearCommandDiscovery();
       },
       async refreshSnapshot(options = {}) {
@@ -1426,14 +1483,14 @@ export function createWebStore(
           ) {
             // Canonical recovery can change files without a switch event,
             // including copies with the same embedded Session ID.
-            resetThinking();
-            clearThinkingGate();
+            thinking.resetPending();
+            thinking.resetGate();
           }
           if (shouldReset) {
             // A cursor reset means a fresh stream (e.g. host restart), whose
             // sequence restarts at 0. The old revision gate would reject every
             // projection below the old floor and freeze the picker.
-            clearThinkingGate();
+            thinking.resetGate();
           }
           const previousSessionId = get().snapshot?.currentSessionId;
           const previousController = get().snapshot?.sessions.find((session) =>
@@ -1482,8 +1539,8 @@ export function createWebStore(
               snapshot.truncation.modelsOmitted;
           if (controllerChanged) {
             clearCommandDiscovery();
-            resetThinking();
-            clearThinkingGate();
+            thinking.resetPending();
+            thinking.resetGate();
           }
           const recoveredSnapshotNotice =
             snapshotFailureNotice !== null &&
@@ -1492,6 +1549,27 @@ export function createWebStore(
           if (shouldReset || controllerChanged || selectionChanged)
             liveTurnSequence = 0;
           const preserveLiveTurn = liveTurnSequence > snapshot.cursor;
+          const activeTurn = preserveLiveTurn
+            ? get().activeTurn
+            : (snapshot.runtime.activeTurn ?? null);
+          // Retry events can arrive while an older snapshot is in flight.
+          // Preserve both live retry facts and explicit settlement until that
+          // snapshot catches up; a new stream or Session starts a new scope.
+          const preserveLiveRetry =
+            !shouldReset &&
+            !controllerChanged &&
+            !selectionChanged &&
+            liveRetrySequence > snapshot.cursor;
+          const execution = snapshot.selectedExecution;
+          const snapshotRetry =
+            selectedIsCurrent &&
+            snapshot.runtime.status === "running" &&
+            execution?.sessionId === snapshot.selectedSession?.id &&
+            execution?.sessionPath === snapshot.selectedSession?.path &&
+            execution?.status === "running"
+              ? (execution.retry ?? null)
+              : null;
+          const liveRetry = preserveLiveRetry ? get().liveRetry : snapshotRetry;
           set({
             ...(recoveredSnapshotNotice ? { notice: null } : {}),
             ...(shouldReset || controllerChanged || selectionChanged
@@ -1504,16 +1582,15 @@ export function createWebStore(
                 }
               : {}),
             connection:
-              get().connection === "connecting"
-                ? "connecting"
+              streamAttempt?.connected && !streamAttempt.signal.aborted
+                ? "connected"
                 : get().connection,
             cursor:
               shouldReset || get().cursor === null
                 ? snapshot.cursor
                 : Math.max(get().cursor ?? 0, snapshot.cursor),
-            activeTurn: preserveLiveTurn
-              ? get().activeTurn
-              : (snapshot.runtime.activeTurn ?? null),
+            ...retainTurnCancellation(activeTurn),
+            activeTurn,
             livePhase: preserveLiveTurn
               ? get().livePhase
               : snapshot.runtime.status === "running"
@@ -1521,13 +1598,7 @@ export function createWebStore(
                 : !get().promptAdmissionPending && !promptAdmission
                   ? "idle"
                   : get().livePhase,
-            liveRetry:
-              !preserveLiveTurn &&
-              snapshot.runtime.status !== "running" &&
-              !get().promptAdmissionPending &&
-              !promptAdmission
-                ? null
-                : get().liveRetry,
+            liveRetry,
             liveRunning: preserveLiveTurn
               ? get().liveRunning
               : snapshot.runtime.status === "running"
@@ -1541,7 +1612,17 @@ export function createWebStore(
             snapshot,
             ...(modelSearchChanged ? resetModelSearch() : {}),
           });
-          acceptThinking();
+          if (!preserveLiveRetry) liveRetrySequence = snapshot.cursor;
+          if (!(shouldReset || controllerChanged || selectionChanged)) {
+            const retained = retainThinkingTiming(
+              get().liveMessages,
+              snapshot.selectedSession?.entries,
+              get().thinkingStarts,
+              get().thinkingDurations,
+            );
+            if (retained) set(retained);
+          }
+          thinking.accept();
           return true;
         } catch (error) {
           if (epoch !== sessionEpoch || generation !== snapshotGeneration)
@@ -1586,7 +1667,7 @@ export function createWebStore(
           return;
         ++sessionEpoch;
         creationRetry = null;
-        resetThinking();
+        thinking.resetPending();
         clearCommandDiscovery();
         promptAdmissionToken = null;
         promptAdmission = null;
@@ -1654,7 +1735,7 @@ export function createWebStore(
       async createSession(workspacePath) {
         if (!workspacePath || get().modelSelectionPending) return null;
         const epoch = ++sessionEpoch;
-        resetThinking();
+        thinking.resetPending();
         clearCommandDiscovery();
         const commandId =
           (creationRetry?.workspacePath === workspacePath
@@ -1822,7 +1903,7 @@ export function createWebStore(
           modelSelectionPending: false,
         });
         const epoch = sameView ? sessionEpoch : ++sessionEpoch;
-        resetThinking();
+        thinking.resetPending();
         if (!sameView) {
           promptAdmissionToken = null;
           promptAdmission = null;
@@ -2121,7 +2202,7 @@ export function createWebStore(
           ownedEpoch = nextEpoch;
           promptAdmission = null;
           promptAdmissionToken = null;
-          resetThinking();
+          thinking.resetPending();
           clearCommandDiscovery();
           set({
             ...resetLivePatch(),
@@ -2375,7 +2456,7 @@ export function createWebStore(
           }
           if (epoch === sessionEpoch && get().selectedPath === path) {
             ++sessionEpoch;
-            resetThinking();
+            thinking.resetPending();
             clearCommandDiscovery();
             promptAdmissionToken = null;
             promptAdmission = null;
@@ -2497,14 +2578,23 @@ export function createWebStore(
       },
       async unarchiveSession(path) {
         const epoch = sessionEpoch;
-        try {
-          await client.unarchiveSession(path);
+        const noticeKeys = new Set(
+          get()
+            .archiveNotices.filter((item) => item.path === path)
+            .map((item) => item.key),
+        );
+        const dismissConfirmedNotices = () =>
           set((state) => ({
             archiveNotices: state.archiveNotices.filter(
-              (item) => item.path !== path,
+              (item) => !noticeKeys.has(item.key),
             ),
           }));
-          if (epoch !== sessionEpoch) return true;
+        try {
+          await client.unarchiveSession(path);
+          if (epoch !== sessionEpoch) {
+            dismissConfirmedNotices();
+            return true;
+          }
           const generation = snapshotGeneration;
           let refreshed = await actions.refreshSnapshot({ epoch });
           // A concurrent refresh can supersede ours, which then reports false
@@ -2516,7 +2606,9 @@ export function createWebStore(
             snapshotGeneration > generation + 1
           )
             refreshed = await actions.refreshSnapshot({ epoch });
-          return epoch !== sessionEpoch || refreshed;
+          const confirmed = epoch !== sessionEpoch || refreshed;
+          if (confirmed) dismissConfirmedNotices();
+          return confirmed;
         } catch (error) {
           if (epoch === sessionEpoch) showError(error);
           return false;
@@ -2556,7 +2648,7 @@ export function createWebStore(
           state.selectedPath !== state.snapshot?.selectedSession?.path
         )
           return false;
-        resetThinking();
+        thinking.resetPending();
         return applyModel(
           { provider, id: modelId },
           sessionEpoch,
@@ -2633,30 +2725,7 @@ export function createWebStore(
       clearModelSearch() {
         set(resetModelSearch());
       },
-      selectThinking(level) {
-        const state = get();
-        const thinking = state.snapshot?.thinking;
-        const sessionId = state.snapshot?.selectedSession?.id;
-        if (
-          !level ||
-          !thinking?.supported ||
-          state.sessionSwitching ||
-          state.modelSelectionPending ||
-          state.workspaceDraft ||
-          !sessionId ||
-          !isControlledSession(state.snapshot) ||
-          sessionId !== state.snapshot?.currentSessionId ||
-          state.selectedPath !== state.snapshot?.selectedSession?.path ||
-          state.liveRunning ||
-          state.snapshot?.runtime.status === "running"
-        )
-          return;
-        if (level === (state.thinkingPendingLevel ?? thinking.level)) return;
-        thinkingTarget = level;
-        thinkingSeq++;
-        set({ thinkingPendingLevel: level });
-        void flushThinking();
-      },
+      selectThinking: thinking.select,
       async selectPlanMode(enabled) {
         const state = get();
         const snapshot = state.snapshot;
@@ -2802,15 +2871,25 @@ export function createWebStore(
         )
           return;
         const epoch = sessionEpoch;
+        const sessionPath = get().selectedPath;
+        const request = { ...turn };
+        turnCancellation = request;
+        const ownsCancellation = () =>
+          turnCancellation === request &&
+          epoch === sessionEpoch &&
+          sessionPath === get().selectedPath;
         set({ turnCancellationPending: true });
         try {
           await client.cancelActiveTurn(turn);
         } catch (error) {
-          if (epoch !== sessionEpoch) return;
+          if (!ownsCancellation()) return;
           await actions.refreshSnapshot({ epoch });
-          if (epoch === sessionEpoch) showError(error);
+          if (ownsCancellation()) showError(error);
         } finally {
-          if (epoch === sessionEpoch) set({ turnCancellationPending: false });
+          if (turnCancellation === request) {
+            turnCancellation = null;
+            set({ turnCancellationPending: false });
+          }
         }
       },
       async sendPrompt(
@@ -3113,6 +3192,8 @@ export function createWebStore(
             ["PLAN_BUSY", "PLAN_CONFLICT", "PLAN_CONTROL_UNAVAILABLE"].includes(
               error.code ?? "",
             );
+          const turnConflict =
+            error instanceof WebApiError && error.code === "TURN_CONFLICT";
           const knownRejection =
             planAdmissionRejected ||
             (error instanceof WebApiError &&
@@ -3215,6 +3296,9 @@ export function createWebStore(
           }
           if (promptAdmission?.commandId === commandId) promptAdmission = null;
           set({
+            // A definite rejection has settled admission. Let the refreshed
+            // runtime clear the previous turn instead of preserving it as pending.
+            promptAdmissionPending: false,
             liveMessages: get().liveMessages.filter(
               (entry) => entry.key !== optimisticKey,
             ),
@@ -3225,7 +3309,7 @@ export function createWebStore(
               ? { promptAdmissionRecovery: null }
               : {}),
           });
-          if (planAdmissionRejected) {
+          if (planAdmissionRejected || turnConflict) {
             await actions.refreshSnapshot({ epoch });
             if (
               epoch !== sessionEpoch ||
@@ -3234,7 +3318,7 @@ export function createWebStore(
             )
               return false;
           }
-          showError(error);
+          showError(turnConflict ? new Error(i18n.t("steerStaleTurn")) : error);
           return false;
         } finally {
           if (epoch === sessionEpoch && promptAdmissionToken === admission) {

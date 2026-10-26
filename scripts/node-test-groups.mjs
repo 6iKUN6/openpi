@@ -1,10 +1,4 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
-
-const backgroundTerminalsRoot = resolve(
-  "tests",
-  "extensions",
-  "background-terminals",
-);
+import { resolve } from "node:path";
 
 // This fixture starts a real Pi host in a subprocess with an 8-second bound.
 // Under the Windows parallel suite, cold extension loading can consume that
@@ -30,16 +24,15 @@ const gitInfoProcessTest = resolve(
   "git-info",
   "process.test.ts",
 );
-
-function isBackgroundTerminalsTest(file) {
-  const relativePath = relative(backgroundTerminalsRoot, file);
-  return (
-    relativePath !== "" &&
-    relativePath !== ".." &&
-    !relativePath.startsWith(`..${sep}`) &&
-    !isAbsolute(relativePath)
-  );
-}
+// This real Pi fixture launches PowerShell and Node behind a socket gate.
+// Keep cold Windows startup out of the parallel shards without weakening its
+// ordering assertions or extending its 15-second watchdog.
+const postEditLifecycleTest = resolve(
+  "tests",
+  "extensions",
+  "post-edit",
+  "lifecycle.test.ts",
+);
 
 export function partitionNodeTestsByPlatform(
   files,
@@ -52,10 +45,10 @@ export function partitionNodeTestsByPlatform(
   const parallel = [];
   const serial = [];
   for (const file of files) {
-    (isBackgroundTerminalsTest(file) ||
-    file === setupIntegrationTest ||
+    (file === setupIntegrationTest ||
     file === workflowExecutionTest ||
-    file === gitInfoProcessTest
+    file === gitInfoProcessTest ||
+    file === postEditLifecycleTest
       ? serial
       : parallel
     ).push(file);

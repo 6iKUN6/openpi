@@ -8,6 +8,7 @@ import {
   render,
   renderHook,
   screen,
+  waitFor,
 } from "@testing-library/react";
 import { createElement, Fragment, useState } from "react";
 import { jsx } from "react/jsx-runtime";
@@ -152,6 +153,64 @@ it("rejects a copied-path or branch-invalid navigation window", () => {
   expect(result.current.session).toBe(latest);
   expect(result.current.engaged).toBe(false);
 });
+
+it.each(["false", "rejection"])(
+  "ignores an obsolete history refresh %s after returning to the same Session id and path",
+  async (failure) => {
+    const selected = session(29, 30);
+    const other = { ...selected, path: "/sessions/copy.jsonl" };
+    const cache: SessionReadingCache = new Map([
+      [
+        sessionReadingScope(selected),
+        {
+          window: {
+            session: session(0, 10, 20),
+            anchor: "e10",
+            validatedLeaf: "e20",
+          },
+        },
+      ],
+    ]);
+    let failOld!: () => void;
+    let failCurrent!: () => void;
+    const old = new Promise<boolean>((resolve, reject) => {
+      failOld = () =>
+        failure === "false"
+          ? resolve(false)
+          : reject(new Error("Obsolete refresh failed"));
+    });
+    const current = new Promise<boolean>((resolve, reject) => {
+      failCurrent = () =>
+        failure === "false"
+          ? resolve(false)
+          : reject(new Error("Current refresh failed"));
+    });
+    const onRefresh = vi
+      .fn()
+      .mockReturnValueOnce(old)
+      .mockReturnValueOnce(current);
+    const { result, rerender } = renderHook(
+      ({ selected }) =>
+        useSessionHistory(
+          selected,
+          { beforePrepend: vi.fn(), onRefresh },
+          cache,
+        ),
+      { initialProps: { selected } },
+    );
+    expect(onRefresh).toHaveBeenCalledOnce();
+    rerender({ selected: other });
+    rerender({ selected });
+    expect(onRefresh).toHaveBeenCalledTimes(2);
+    expect(result.current.error).toBeNull();
+    await act(async () => failOld());
+    expect(result.current.error).toBeNull();
+    expect(result.current.session?.path).toBe(selected.path);
+    expect(result.current.session?.entries[0]?.id).toBe("e0");
+    await act(async () => failCurrent());
+    expect(result.current.error).toBe("historyValidationUnavailable");
+  },
+);
 
 it("cancels an old page request when a new search navigation takes ownership of reading", async () => {
   const latest = session(29, 30);
@@ -905,6 +964,7 @@ it("keeps a smooth loaded-turn jump unpinned through its first frames without un
     view.rerender(node(snapshot(selected), null, cache));
     expect(viewport.scrollTop).toBe(900);
     expect(scroll).not.toHaveBeenCalled();
+    fireEvent.wheel(viewport, { deltaY: 3 });
     viewport.scrollTop = 903;
     fireEvent.scroll(viewport);
     view.rerender(node(snapshot(selected), null, cache));
@@ -990,7 +1050,15 @@ it.each([0, 35])(
   },
 );
 
-it.each(["wheel", "ArrowUp", "PageUp", "Home", "Shift+Space"])(
+it.each([
+  "wheel",
+  "ArrowUp",
+  "PageUp",
+  "Home",
+  "Shift+Space",
+  "touch",
+  "scrollbar",
+])(
   "pauses streamed bottom following on %s before scroll delivery and resumes on a downward return",
   async (input) => {
     const originalScroll = Object.getOwnPropertyDescriptor(
@@ -1033,7 +1101,11 @@ it.each(["wheel", "ArrowUp", "PageUp", "Home", "Shift+Space"])(
         view.container.querySelector<HTMLElement>(".conversation")!;
       expect(viewport.scrollTop).toBe(903);
       scroll.mockClear();
-      if (input === "wheel") fireEvent.wheel(viewport, { deltaY: -3 });
+      if (input === "touch") {
+        fireEvent.touchStart(viewport, { touches: [{ clientY: 100 }] });
+        fireEvent.touchMove(viewport, { touches: [{ clientY: 110 }] });
+      } else if (input === "wheel" || input === "scrollbar")
+        fireEvent.wheel(viewport, { deltaY: -3 });
       else
         fireEvent.keyDown(viewport, {
           key: input === "Shift+Space" ? " " : input,
@@ -1059,6 +1131,28 @@ it.each(["wheel", "ArrowUp", "PageUp", "Home", "Shift+Space"])(
       expect(screen.getByText("Fourth streamed text")).toBeTruthy();
       expect(viewport.scrollTop).toBe(900);
       expect(scroll).not.toHaveBeenCalled();
+      // Layout/anchoring can move downward near the tail without reader input.
+      viewport.scrollTop = 902;
+      fireEvent.scroll(viewport);
+      fireEvent(viewport, new Event("scrollend"));
+      view.rerender(stream("Layout changed below the reader"));
+      expect(scroll).not.toHaveBeenCalled();
+      expect(
+        screen.getByRole("button", { name: i18n.t("jumpToLatest") }),
+      ).toBeTruthy();
+      if (input === "touch") {
+        fireEvent.touchMove(viewport, { touches: [{ clientY: 90 }] });
+      } else if (input === "scrollbar") fireEvent.pointerDown(viewport);
+      else if (input === "wheel") fireEvent.wheel(viewport, { deltaY: 30 });
+      else
+        fireEvent.keyDown(viewport, {
+          key:
+            input === "Home"
+              ? "End"
+              : input === "Shift+Space"
+                ? " "
+                : input.replace("Up", "Down"),
+        });
       viewport.scrollTop = height - viewport.clientHeight;
       fireEvent.scroll(viewport);
       expect(
@@ -1066,8 +1160,7 @@ it.each(["wheel", "ArrowUp", "PageUp", "Home", "Shift+Space"])(
       ).toBeNull();
       height = 1600;
       view.rerender(stream("Fifth streamed text"));
-      expect(viewport.scrollTop).toBe(973);
-      expect(scroll).toHaveBeenCalledWith({ top: 1600, behavior: "instant" });
+      await waitFor(() => expect(viewport.scrollTop).toBe(973));
     } finally {
       if (originalScroll)
         Object.defineProperty(
@@ -1079,6 +1172,127 @@ it.each(["wheel", "ArrowUp", "PageUp", "Home", "Shift+Space"])(
     }
   },
 );
+
+it("preserves the visible history message through streamed layout shifts and deferred resizing", async () => {
+  const resizes = new Set<() => void>();
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(private readonly callback: () => void) {}
+      observe(element: Element) {
+        if (element.classList.contains("conversation"))
+          resizes.add(this.callback);
+      }
+      disconnect() {
+        resizes.delete(this.callback);
+      }
+    },
+  );
+  let growthAbove = 0;
+  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(2000);
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(627);
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+    function (this: HTMLElement) {
+      const root = this.closest<HTMLElement>(".conversation");
+      if (this === root) return new DOMRect(0, 0, 800, 627);
+      const key = this.dataset.historyMessage ?? this.dataset.historyEntry;
+      const index = key?.match(/^e(\d+)$/)?.[1];
+      return new DOMRect(
+        0,
+        Number(index ?? -10) * 450 + growthAbove - (root?.scrollTop ?? 0),
+        800,
+        100,
+      );
+    },
+  );
+  vi.spyOn(HTMLElement.prototype, "getClientRects").mockImplementation(
+    function (this: HTMLElement) {
+      return [this.getBoundingClientRect()] as unknown as DOMRectList;
+    },
+  );
+  try {
+    const selected = session(0, 2);
+    const state = snapshot(selected);
+    state.runtime.status = "running";
+    const cache: SessionReadingCache = new Map();
+    const stream = (content: string) =>
+      node(
+        state,
+        null,
+        cache,
+        [{ key: "stream", message: { role: "assistant", content } }],
+        { liveRunning: true, livePhase: "running" },
+      );
+    const view = render(stream("Initial output"));
+    const root = view.container.querySelector<HTMLElement>(".conversation")!;
+    fireEvent.wheel(root, { deltaY: -100 });
+    root.scrollTop = 300;
+    fireEvent.scroll(root);
+    const message = view.container.querySelector<HTMLElement>(
+      '[data-history-message="e1"]',
+    )!;
+    expect(message.getBoundingClientRect().top).toBe(150);
+    growthAbove = 180;
+    view.rerender(stream("Output continues below the reader"));
+    expect(root.scrollTop).toBe(480);
+    expect(message.getBoundingClientRect().top).toBe(150);
+    growthAbove = 260;
+    await act(async () => {
+      for (const resize of resizes) resize();
+    });
+    expect(root.scrollTop).toBe(560);
+    expect(message.getBoundingClientRect().top).toBe(150);
+    fireEvent.scroll(root);
+    expect(
+      screen.getByRole("button", { name: i18n.t("jumpToLatest") }),
+    ).toBeTruthy();
+    // Tail-only growth leaves the historical message and offset untouched.
+    view.rerender(stream("Even more output below the reader"));
+    expect(root.scrollTop).toBe(560);
+    expect(view.container.querySelector('[data-history-message="e1"]')).toBe(
+      message,
+    );
+    // A search jump owns the viewport even before its native scroll event.
+    const target: Navigation = {
+      sessionId: selected.id,
+      sessionPath: selected.path,
+      entryId: "e2",
+      revision: 1,
+      session: {
+        ...selected,
+        history: {
+          ...selected.history!,
+          anchorEntryId: "e2",
+          anchorOnBranch: true,
+        },
+      },
+    };
+    const destination = view.container.querySelector<HTMLElement>(
+      '[data-history-message="e2"]',
+    )!;
+    view.rerender(
+      node(state, target, cache, [], {
+        liveRunning: true,
+        livePhase: "running",
+      }),
+    );
+    await waitFor(() =>
+      expect(destination.getBoundingClientRect().top).toBe(24),
+    );
+    await act(async () => {
+      for (const resize of resizes) resize();
+    });
+    view.rerender(
+      node(state, target, cache, [], {
+        liveRunning: true,
+        livePhase: "running",
+      }),
+    );
+    expect(destination.getBoundingClientRect().top).toBe(24);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 it("returns keyboard focus to the latest native message when the latest button disappears", async () => {
   const view = render(node(snapshot(session(0, 3)), null, new Map()));
@@ -1294,7 +1508,7 @@ it.each(
   ),
 )(
   "preserves $owner keyboard ownership for $key on a focused $control before scroll delivery",
-  ({ owner, control, key }) => {
+  async ({ owner, control, key }) => {
     const calls = ["first", "second"].map((id) => ({
       type: "toolCall" as const,
       id,
@@ -1326,6 +1540,14 @@ it.each(
       });
     };
     const view = render(stream("First native output"));
+    if (owner === "process") {
+      const sequence =
+        view.container.querySelector<HTMLDetailsElement>(".process-sequence")!;
+      act(() => {
+        sequence.open = true;
+        fireEvent(sequence, new Event("toggle"));
+      });
+    }
     const scroller = view.container.querySelector<HTMLElement>(
       ".process-sequence-scroll",
     )!;
@@ -1385,11 +1607,12 @@ it.each(
     view.rerender(stream("Fourth native output"));
     expect(element.scrollTop).toBe(533);
     expect(setTop).not.toHaveBeenCalled();
+    fireEvent.wheel(element, { deltaY: 30 });
     element.scrollTop = height - element.clientHeight;
     fireEvent.scroll(element);
     height = 1000;
     view.rerender(stream("Fifth native output"));
-    expect(element.scrollTop).toBe(640);
+    await waitFor(() => expect(element.scrollTop).toBe(640));
   },
 );
 
@@ -1446,6 +1669,7 @@ it("preserves an upward reader through a prepended bottom clamp and resumes afte
     ).toBeTruthy();
     viewport.scrollTop = 299;
     fireEvent.scroll(viewport);
+    fireEvent.wheel(viewport, { deltaY: 3 });
     viewport.scrollTop = 300;
     fireEvent.scroll(viewport);
     view.rerender(node(snapshot(selected), null, cache));

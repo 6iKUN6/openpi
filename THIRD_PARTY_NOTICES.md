@@ -10,6 +10,14 @@ it does not install or activate the package's desktop helper.
 
 ## Project origins and acknowledgments
 
+The Web execution trajectory adapts the compact ledger, three-lane overview,
+range selection, and record inspector of DeepSeek Harness at revision
+`d743267388641bc76f17c45ce8b4c231aed1d32c`, from
+[`@deepseek-ai/dsh-client-ui-trajectory`](https://github.com/deepseek-ai/deepseek-harness/tree/d743267388641bc76f17c45ce8b4c231aed1d32c/packages/client/ui-trajectory).
+OpenPI keeps Pi's Session records and bounded Web projections; it does not embed
+Cordis or the DeepSeek agent runtime. The MIT notice is reproduced in
+[`web/ui/src/features/trajectory/LICENSE.dsh`](web/ui/src/features/trajectory/LICENSE.dsh).
+
 The Web model settings page adapts the provider cards, inline editors and model
 selection interactions of `@deepseek-ai/dsh-client-ui-settings-models` version
 `0.1.7-rc.2`, from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
@@ -24,6 +32,18 @@ retained; Cursor's app background and Antigravity's color filters are omitted fo
 a monochrome mask that follows OpenPI's theme. These are presentation assets,
 not a provider registry. The MIT notice is reproduced in
 [`web/ui/src/features/settings/provider-icons/LICENSE.opencode`](web/ui/src/features/settings/provider-icons/LICENSE.opencode).
+
+Additional provider brand SVGs were vendored from the provider-brand collection in
+[`apache/maka`](https://github.com/apache/maka) revision
+`59f61cf7de665837630518aa204732107dcc2349` and from
+[`@lobehub/icons-static-svg`](https://github.com/lobehub/lobe-icons) version
+`1.91.0` (MIT). The LocalAI mark comes from
+[`mudler/LocalAI`](https://github.com/mudler/LocalAI) revision
+`b10e330590766ea621c0b03401e77a0589558e76` (MIT). Their notices are included in
+[`LICENSE.lobe-icons`](web/ui/src/features/settings/provider-icons/LICENSE.lobe-icons)
+and [`LICENSE.localai`](web/ui/src/features/settings/provider-icons/LICENSE.localai).
+Brand names and logos remain trademarks of their respective owners and are used
+only to identify providers and models.
 
 The workspace Files explorer and preview interactions were informed by
 [DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar), revision

@@ -8,7 +8,7 @@ import fsPromises, {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, ServerResponse } from "node:http";
 import { syncBuiltinESMExports } from "node:module";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,6 +18,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { WEB_TURN_TIMING_ENTRY } from "../../web/protocol/turn-timing.ts";
 import {
+  projectWorkflowAgentDetail,
   registerWebCapability,
   registerWebCapabilityActions,
 } from "../../extensions/shared/web-observer-registry.ts";
@@ -306,6 +307,7 @@ test("appearance writes preserve package config, reject extra authority, and nev
       { auxiliaryWidth: 520.5 },
       { chatFontSize: 12.5 },
       { expandThinking: "true" },
+      { followUpBehavior: "unknown" },
       { pinnedSort: "unknown" },
       { sidebarGrouping: "connection" },
       { chatsSort: "updated_at" },
@@ -334,6 +336,7 @@ test("appearance writes preserve package config, reject extra authority, and nev
       auxiliaryWidth: 600,
       chatFontSize: 16,
       expandThinking: true,
+      followUpBehavior: "steer",
       pinnedSort: "updated",
       sidebarGrouping: "list",
       chatsSort: "manual",
@@ -360,6 +363,7 @@ test("appearance writes preserve package config, reject extra authority, and nev
         webAuxiliaryWidth: 600,
         webChatFontSize: 16,
         webExpandThinking: true,
+        webFollowUpBehavior: "steer",
         webPinnedSort: "updated",
         webSidebarGrouping: "list",
         webChatsSort: "manual",
@@ -373,6 +377,7 @@ test("appearance writes preserve package config, reject extra authority, and nev
     });
     const status = formatSetupConfig(loadSetupConfig());
     assert.match(status, /Subagent results: full by default/u);
+    assert.match(status, /Web follow-up behavior: steer the active turn/u);
     assert.match(status, /Bash operations: expanded by default/u);
     assert.match(status, /Write\/Edit operations: expanded by default/u);
     assert.match(status, /custom footer off/u);
@@ -399,6 +404,7 @@ test("appearance writes preserve package config, reject extra authority, and nev
     assert.equal(preferences.chatWidth, 1200);
     assert.equal(preferences.sidebarWidth, 320);
     assert.equal(preferences.auxiliaryWidth, 600);
+    assert.equal(preferences.followUpBehavior, "steer");
     assert.equal(preferences.subagentResultDisplay, "full");
     assert.equal(preferences.bashToolDisplay, "full");
     assert.equal(preferences.fileMutationDisplay, "full");
@@ -550,6 +556,13 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
   const imported = await mkdtemp(join(tmpdir(), "openpi-web-import-"));
   let runtimeCwd = cwd;
   let sessionManager = SessionManager.inMemory(cwd);
+  const workflowDetail = projectWorkflowAgentDetail("wf_a1", {
+    index: 1,
+    state: "done",
+    transcript: [],
+    transcriptUnavailable: true,
+  });
+  assert.ok(workflowDetail);
   const unregister = registerWebCapability(sessionManager, {
     kind: "workflows",
     snapshot: () => ({
@@ -564,40 +577,9 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
       omitted: 0,
       truncated: false,
     }),
+    detail: (id) => (id === workflowDetail.id ? workflowDetail : undefined),
   });
-  const unregisterTerminalDetails = registerWebCapability(sessionManager, {
-    kind: "background-terminals",
-    snapshot: () => ({ items: [], omitted: 0, truncated: false }),
-    detail: (id) =>
-      id === "bt-test"
-        ? {
-            kind: "background-terminals",
-            id,
-            title: "server",
-            command: "run-server",
-            cwd,
-            status: "running",
-            createdAt: 1,
-            stdout: {
-              text: "ready",
-              totalBytes: 5,
-              retainedBytes: 5,
-              omittedBytes: 0,
-              truncated: false,
-              recoveryAvailable: false,
-            },
-            stderr: {
-              text: "",
-              totalBytes: 0,
-              retainedBytes: 0,
-              omittedBytes: 0,
-              truncated: false,
-              recoveryAvailable: false,
-            },
-            truncated: false,
-          }
-        : undefined,
-  });
+  const workflowDetailUrl = `/api/capabilities/detail?kind=workflows&id=${encodeURIComponent(workflowDetail.id)}`;
   const capabilityActions: string[] = [];
   const unregisterCapabilityActions = registerWebCapabilityActions(
     sessionManager,
@@ -895,10 +877,28 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
     assert.match(pageHtml, /href="\/favicon\.svg"/);
     assert.doesNotMatch(pageHtml, /marked\.js|https?:\/\//u);
 
-    const app = await fetch(`${launched.origin}/app.js`);
-    assert.equal(app.status, 200);
-    assert.match(app.headers.get("content-type") || "", /javascript/);
-    const appSource = await app.text();
+    const preloadScripts = [...pageHtml.matchAll(/<link\b[^>]*>/gu)]
+      .map(([tag]) => tag)
+      .filter((tag) => /\brel="modulepreload"/u.test(tag))
+      .map((tag) => {
+        const href = tag.match(/\bhref="([^"]+)"/u)?.[1];
+        assert.ok(href, "Module preload must name its script");
+        return href;
+      });
+    const appSource = (
+      await Promise.all(
+        ["/app.js", ...preloadScripts].map(async (path) => {
+          const script = await fetch(new URL(path, launched.origin));
+          assert.equal(script.status, 200, path);
+          assert.match(
+            script.headers.get("content-type") || "",
+            /javascript/,
+            path,
+          );
+          return script.text();
+        }),
+      )
+    ).join("\n");
     assert.ok(!appSource.includes(token));
     assert.match(appSource, /OpenPI Web root is missing/);
     assert.match(appSource, /openpi\.web\.token/);
@@ -992,11 +992,7 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
     });
     delete runtime.getThinkingState;
     assert.equal(
-      (
-        await fetch(
-          `${launched.origin}/api/capabilities/detail?kind=background-terminals&id=bt-test`,
-        )
-      ).status,
+      (await fetch(`${launched.origin}${workflowDetailUrl}`)).status,
       401,
     );
 
@@ -1166,7 +1162,7 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
       "/api/thinking",
       "/api/trust",
       "/api/providers/auth-status",
-      "/api/capabilities/detail?kind=background-terminals&id=bt-test",
+      workflowDetailUrl,
     ]) {
       const separator = route.includes("?") ? "&" : "?";
       const mismatched = await fetch(
@@ -1177,7 +1173,7 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
       assert.equal((await mismatched.json()).code, "SESSION_CHANGED");
     }
     const scopedDetail = await fetch(
-      `${launched.origin}/api/capabilities/detail?kind=background-terminals&id=bt-test&sessionId=${encodeURIComponent(sessionManager.getSessionId())}`,
+      `${launched.origin}${workflowDetailUrl}&sessionId=${encodeURIComponent(sessionManager.getSessionId())}`,
       { headers: authorized },
     );
     assert.equal(scopedDetail.status, 200);
@@ -1186,38 +1182,16 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
       sessionManager.getSessionId(),
     );
     const terminalDetailResponse = await fetch(
-      `${launched.origin}/api/capabilities/detail?kind=background-terminals&id=bt-test`,
+      `${launched.origin}${workflowDetailUrl}`,
       { headers: authorized },
     );
     assert.equal(terminalDetailResponse.status, 200);
-    assert.deepEqual((await terminalDetailResponse.json()).detail, {
-      kind: "background-terminals",
-      id: "bt-test",
-      title: "server",
-      command: "run-server",
-      cwd,
-      status: "running",
-      createdAt: 1,
-      stdout: {
-        text: "ready",
-        totalBytes: 5,
-        retainedBytes: 5,
-        omittedBytes: 0,
-        truncated: false,
-        recoveryAvailable: false,
-      },
-      stderr: {
-        text: "",
-        totalBytes: 0,
-        retainedBytes: 0,
-        omittedBytes: 0,
-        truncated: false,
-        recoveryAvailable: false,
-      },
-      truncated: false,
-    });
+    assert.deepEqual(
+      (await terminalDetailResponse.json()).detail,
+      JSON.parse(JSON.stringify(workflowDetail)),
+    );
     const staleTerminalResponse = await fetch(
-      `${launched.origin}/api/capabilities/detail?kind=background-terminals&id=bt-missing`,
+      `${launched.origin}/api/capabilities/detail?kind=workflows&id=${encodeURIComponent("wf_a1:call:9")}`,
       { headers: authorized },
     );
     assert.equal(staleTerminalResponse.status, 404);
@@ -1375,6 +1349,8 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
     assert.equal(diagnosticsResponse.status, 200);
     const diagnosticsBody = await diagnosticsResponse.json();
     assert.deepEqual(diagnosticsBody, {
+      openpi: (await import("../../web/host/runtime-info.ts"))
+        .webRuntimeStartup,
       node: process.version,
       cwd,
       sessionId: sessionManager.getSessionId(),
@@ -1715,7 +1691,6 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
   } finally {
     await host.stop();
     assert.equal(disposed, true);
-    unregisterTerminalDetails();
     unregisterCapabilityActions();
     unregister();
     await Promise.all(
@@ -6795,6 +6770,167 @@ for (const wallShift of [0, 120_000, -120_000]) {
     }
   });
 }
+
+test("shutdown requires authentication, same-origin authority, POST, and an explicit host capability", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "openpi-shutdown-auth-"));
+  const runtime = testRuntime(cwd);
+  let calls = 0;
+  const { host, launched, headers } = await startTestHost(runtime, {
+    onShutdown: () => {
+      calls++;
+    },
+  });
+  t.after(async () => {
+    await host.stop();
+    await rm(cwd, { recursive: true, force: true });
+  });
+  const route = `${launched.origin}/api/shutdown`;
+  assert.equal((await fetch(route, { method: "POST" })).status, 401);
+  assert.equal(
+    (
+      await fetch(route, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${"0".repeat(64)}` },
+      })
+    ).status,
+    401,
+  );
+  assert.equal(
+    (
+      await fetch(route, {
+        method: "POST",
+        headers: { ...headers, Origin: "https://foreign.example" },
+      })
+    ).status,
+    403,
+  );
+  for (const method of ["GET", "HEAD", "PUT", "DELETE"]) {
+    const response = await fetch(route, { method, headers });
+    assert.equal(response.status, 405);
+    assert.equal(response.headers.get("allow"), "POST");
+    await response.arrayBuffer();
+  }
+  assert.equal(calls, 0);
+
+  const unsupported = await startTestHost(testRuntime(cwd));
+  try {
+    const response = await fetch(
+      `${unsupported.launched.origin}/api/shutdown`,
+      {
+        method: "POST",
+        headers: unsupported.headers,
+      },
+    );
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).code, "SHUTDOWN_UNAVAILABLE");
+    assert.equal(
+      (
+        await fetch(`${unsupported.launched.origin}/api/snapshot`, {
+          headers: unsupported.headers,
+        })
+      ).status,
+      200,
+    );
+    assert.equal(calls, 0);
+  } finally {
+    await unsupported.host.stop();
+  }
+});
+
+test("shutdown admissions are idempotent without an active workspace or Session", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "openpi-shutdown-once-"));
+  const runtime = {
+    ...testRuntime(cwd, async () => {
+      assert.fail("Shutdown must not call the model");
+    }),
+    workspaceSelected: false,
+  };
+  let calls = 0;
+  const invoked = Promise.withResolvers<void>();
+  const { host, launched, headers } = await startTestHost(runtime, {
+    onShutdown: () => {
+      calls++;
+      invoked.resolve();
+    },
+  });
+  t.after(async () => {
+    await host.stop();
+    await rm(cwd, { recursive: true, force: true });
+  });
+  // Keep this fixture's listener alive to test retry admissions during shutdown.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await fetch(`${launched.origin}/api/shutdown`, {
+      method: "POST",
+      headers,
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { accepted: true });
+  }
+  await invoked.promise;
+  // Flush any erroneously scheduled duplicate callbacks too.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+});
+
+test("shutdown sends acceptance before CLI-owned orderly cleanup settles", {
+  timeout: 3_000,
+}, async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "openpi-shutdown-cleanup-"));
+  const runtime = testRuntime(cwd);
+  let receiptSent = false;
+  const emit = ServerResponse.prototype.emit;
+  t.mock.method(
+    ServerResponse.prototype,
+    "emit",
+    function (
+      this: ServerResponse,
+      event: string | symbol,
+      ...args: unknown[]
+    ) {
+      if (event === "finish" && this.req.url === "/api/shutdown")
+        receiptSent = true;
+      return emit.call(this, event, ...args);
+    },
+  );
+  const disposing = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let disposed = 0;
+  runtime.dispose = async () => {
+    disposed++;
+    disposing.resolve();
+    await release.promise;
+  };
+  let cleanup: Promise<void> | undefined;
+  const { host, launched, headers } = await startTestHost(runtime, {
+    onShutdown: () => {
+      assert.equal(
+        receiptSent,
+        true,
+        "CLI shutdown must follow the sent receipt",
+      );
+      cleanup = host.stop();
+    },
+  });
+  t.after(async () => {
+    release.resolve();
+    await host.stop();
+    await rm(cwd, { recursive: true, force: true });
+  });
+  const response = await fetch(`${launched.origin}/api/shutdown`, {
+    method: "POST",
+    headers,
+  });
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { accepted: true });
+  await disposing.promise;
+  assert.equal(disposed, 1);
+  assert.ok(cleanup);
+  release.resolve();
+  await cleanup;
+  await host.stop();
+  assert.equal(disposed, 1);
+  await assert.rejects(fetch(`${launched.origin}/api/snapshot`, { headers }));
+});
 
 test("stop disposes the runtime before waiting for an in-flight prompt request", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "openpi-web-stop-prompt-"));

@@ -1,9 +1,10 @@
+import { Tooltip } from "@astryxdesign/core/Tooltip";
 import {
   Popover,
   type PopoverTriggerRenderProps,
 } from "@astryxdesign/core/Popover";
 import { ChevronRight, FileDiff, Plus, Link as LinkIcon } from "lucide-react";
-import { useContext, useRef, useState } from "react";
+import { useContext, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { WebGitReviewResult } from "../../../../protocol/types.ts";
 import { SubagentAvatar } from "./SubagentAvatar.tsx";
@@ -21,9 +22,11 @@ export function SessionOverview({
   workspace,
   agents,
   omitted,
+  omittedWorkflows = 0,
   review,
   onSubagents,
   onReview,
+  onSources,
   sessionPath,
   revision,
   onAddSources,
@@ -34,9 +37,11 @@ export function SessionOverview({
   workspace: string;
   agents: ReturnType<typeof subagentOverview>;
   omitted: number;
+  omittedWorkflows?: number;
   review: WebGitReviewResult | null;
   onSubagents: () => void;
   onReview: () => void;
+  onSources?: () => void;
   sessionPath?: string;
   revision?: string;
   onAddSources?: () => void;
@@ -47,6 +52,8 @@ export function SessionOverview({
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement | null>(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [sourcesExpanded, setSourcesExpanded] = useState(true);
+  const sourcesId = useId();
   const [source, setSource] = useState<WebSessionSource | null>(null);
   const sources = useSessionSources(
     sessionId,
@@ -57,7 +64,11 @@ export function SessionOverview({
   const artifacts = useContext(ArtifactContext);
   const totals = review?.ok ? review.snapshot.totals : undefined;
   const openSource = (item: WebSessionSource | null) => {
-    if (item?.kind === "file" && item.reference) {
+    if (!item && onSources) {
+      setSourcesOpen(false);
+      setSource(null);
+      activate(onSources);
+    } else if (item?.kind === "file" && item.reference) {
       setSourcesOpen(false);
       activate(() =>
         artifacts?.open(
@@ -181,88 +192,116 @@ export function SessionOverview({
               {omitted > 0 && (
                 <small>{t("subagentListTruncated", { count: omitted })}</small>
               )}
+              {omittedWorkflows > 0 && (
+                <small>
+                  {t("subagentWorkflowsTruncated", { count: omittedWorkflows })}
+                </small>
+              )}
             </div>
             {sessionPath && (
               <div className="session-overview-section">
                 <div className="session-overview-section-heading">
-                  <span>{t("sessionSources")}</span>
+                  <button
+                    type="button"
+                    className="session-sources-toggle"
+                    aria-expanded={sourcesExpanded}
+                    aria-controls={sourcesId}
+                    onClick={() => setSourcesExpanded((value) => !value)}
+                  >
+                    <span>{t("sessionSources")}</span>
+                    {sources.page &&
+                      (sources.page.total !== undefined ||
+                        sources.page.nextOffset === undefined) && (
+                        <span>
+                          · {sources.page.total ?? sources.page.sources.length}
+                          {sources.page.truncated ? "+" : ""}
+                        </span>
+                      )}
+                    <ChevronRight aria-hidden="true" />
+                  </button>
                   {onAddSources && (
+                    <Tooltip content={t("sourcesAdd")} placement="below">
+                      <button
+                        type="button"
+                        aria-label={t("sourcesAdd")}
+                        onClick={() => activate(onAddSources)}
+                      >
+                        <Plus />
+                      </button>
+                    </Tooltip>
+                  )}
+                </div>
+                <div id={sourcesId} hidden={!sourcesExpanded}>
+                  {sources.page?.sources.slice(0, 3).map((item) => (
+                    <SourceRow
+                      key={item.id}
+                      source={item}
+                      sessionId={sessionId}
+                      path={sessionPath}
+                      onOpen={() => openSource(item)}
+                    />
+                  ))}
+                  {sources.error ? (
+                    <p role="alert">
+                      {t("sourcesFailed")}{" "}
+                      <button type="button" onClick={sources.refresh}>
+                        {t("gitReviewRetry")}
+                      </button>
+                    </p>
+                  ) : (
+                    !sources.page?.sources.length && (
+                      <p>
+                        {t(sources.loading ? "readingFile" : "sourcesEmpty")}
+                      </p>
+                    )
+                  )}
+                  {Boolean(
+                    sources.page &&
+                      (sources.page.sources.length > 3 ||
+                        sources.page.nextOffset !== undefined),
+                  ) && (
                     <button
                       type="button"
-                      aria-label={t("sourcesAdd")}
-                      title={t("sourcesAdd")}
-                      onClick={() => activate(onAddSources)}
+                      className="session-overview-row sources-view-all"
+                      onClick={() => openSource(null)}
                     >
-                      <Plus />
+                      <LinkIcon />
+                      <span>{t("sourcesViewAll")}</span>
+                      <ChevronRight />
                     </button>
                   )}
                 </div>
-                {sources.page?.sources.slice(0, 3).map((item) => (
-                  <SourceRow
-                    key={item.id}
-                    source={item}
-                    sessionId={sessionId}
-                    path={sessionPath}
-                    onOpen={() => openSource(item)}
-                  />
-                ))}
-                {sources.error ? (
-                  <p role="alert">
-                    {t("sourcesFailed")}{" "}
-                    <button type="button" onClick={sources.refresh}>
-                      {t("gitReviewRetry")}
-                    </button>
-                  </p>
-                ) : (
-                  !sources.page?.sources.length && (
-                    <p>{t(sources.loading ? "readingFile" : "sourcesEmpty")}</p>
-                  )
-                )}
-                {Boolean(
-                  sources.page &&
-                    (sources.page.sources.length > 3 ||
-                      sources.page.nextOffset !== undefined),
-                ) && (
-                  <button
-                    type="button"
-                    className="session-overview-row sources-view-all"
-                    onClick={() => openSource(null)}
-                  >
-                    <LinkIcon />
-                    <span>{t("sourcesViewAll")}</span>
-                    <ChevronRight />
-                  </button>
-                )}
               </div>
             )}
           </div>
         }
       >
         {(props: PopoverTriggerRenderProps) => (
-          <button
-            {...props}
-            ref={(element) => {
-              props.ref(element);
-              trigger.current = element;
-            }}
-            type="button"
-            className="task-tools-trigger"
-            title={t("sessionOverview")}
-            aria-label={t("sessionOverview")}
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              aria-hidden="true"
+          <Tooltip content={t("sessionOverview")} placement="below">
+            <button
+              {...props}
+              ref={(element) => {
+                props.ref(element);
+                trigger.current = element;
+              }}
+              type="button"
+              className="task-tools-trigger"
+              aria-label={t("sessionOverview")}
             >
-              <circle cx="5.5" cy="7" r="2.8" />
-              <circle cx="5.5" cy="17" r="2.8" />
-              <path d="M12 7h8M12 17h8" />
-            </svg>
-          </button>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                aria-hidden="true"
+              >
+                <circle cx="5.5" cy="7" r="2.8" />
+                <circle cx="5.5" cy="17" r="2.8" />
+                <path d="M12 7h8M12 17h8" />
+              </svg>
+            </button>
+          </Tooltip>
         )}
       </Popover>
       {sessionPath && (

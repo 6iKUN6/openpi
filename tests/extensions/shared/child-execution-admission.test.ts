@@ -5,12 +5,29 @@ import * as path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
+import { createJiti } from "jiti";
 import {
   ChildExecutionAdmission,
   ChildExecutionAdmissionAbortedError,
   ChildExecutionAdmissionQueueFullError,
+  getSessionChildExecutionAdmission,
   sessionChildExecutionAdmission,
 } from "../../../extensions/shared/child-execution-admission.ts";
+
+test("native Web imports and Pi-loaded extensions share exact Session lease ownership", async () => {
+  const extension = await createJiti(import.meta.url).import<
+    typeof import("../../../extensions/shared/child-execution-admission.ts")
+  >("../../../extensions/shared/child-execution-admission.ts");
+  const owner = {};
+  assert.equal(getSessionChildExecutionAdmission(owner), undefined);
+  const admission = extension.sessionChildExecutionAdmission(owner, {
+    maxActive: 2,
+  });
+  assert.equal(getSessionChildExecutionAdmission(owner), admission);
+  const lease = await admission.acquire("direct");
+  assert.equal(getSessionChildExecutionAdmission(owner)?.snapshot().held, 1);
+  lease.release();
+});
 
 const deferred = <T = void>() => {
   let resolve!: (value: T | PromiseLike<T>) => void;

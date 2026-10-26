@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, realpathSync, unlinkSync } from "node:fs";
 import { readConfiguredPackages } from "./configured-packages.ts";
+import { getSessionChildExecutionAdmission } from "../../extensions/shared/child-execution-admission.ts";
 import { mkdir, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createTurnChangeRecorder } from "./turn-changes.ts";
@@ -126,6 +127,8 @@ type ConversationForkControl = {
 
 type PromptTrace = {
   commandId: string;
+  webOrigin?: PromptTrace;
+  controlRevoked?: boolean;
   sessionId: string;
   startedAt: number;
   executionStartedAt?: number;
@@ -2651,7 +2654,11 @@ export class PiWebRuntime implements WebRuntimeController {
       }
     });
     try {
-      await session.bindExtensions({ mode: "print", onError: (error) => {
+      // A Web host stays alive across turns and auto-delivers async results,
+      // so it is not a print-style run that exits when the turn ends. rpc
+      // keeps hasUI false (no uiContext is passed), leaving every tui-gated
+      // path unchanged.
+      await session.bindExtensions({ mode: "rpc", onError: (error) => {
         publishWebCommandFeedback(session.sessionManager, error.error, "error");
       } });
     } catch (error) {
@@ -2824,9 +2831,10 @@ export class PiWebRuntime implements WebRuntimeController {
     const belongs = (candidate?: PromptTrace) => candidate && matchesSessionIdentity(manager, {
       expectedSessionId: candidate.sessionId, expectedSessionPath: candidate.sessionPath,
     });
-    // A delayed command may still own an unused exact Web origin. A genuinely
-    // native run gets only a control handle, never an HTTP/controller admission.
+    // Keep a new native run identity. Only its actual async Web origin may
+    // supply controller authority; an unrelated background start has none.
     const origin = this.promptOrigins?.getStore();
+    const webOrigin = origin?.webOrigin ?? origin;
     const current = belongs(trace) ? trace!
       : origin && !origin.started && belongs(origin) ? origin
         : {
@@ -2837,6 +2845,9 @@ export class PiWebRuntime implements WebRuntimeController {
             started: false,
             queued: false,
             userMessageObserved: false,
+            ...(webOrigin && belongs(origin) && belongs(webOrigin) && !webOrigin.controlRevoked && webOrigin.outcome !== "cancelled"
+              ? { webOrigin }
+              : {}),
           };
     this.startPromptTrace(current, manager, publish);
     return current;
@@ -2851,6 +2862,9 @@ export class PiWebRuntime implements WebRuntimeController {
       sessionId: trace.sessionId,
       commandId: trace.commandId,
       epoch: trace.epoch,
+      ...(trace.webOrigin && !trace.webOrigin.controlRevoked && trace.webOrigin.outcome !== "cancelled"
+        ? { originCommandId: trace.webOrigin.commandId }
+        : {}),
       ...(prompt ? { promptEntryId: prompt.id } : {}),
       ...(trace.executionStartedAt !== undefined && trace.executionClock !== undefined
         ? {
@@ -2882,6 +2896,7 @@ export class PiWebRuntime implements WebRuntimeController {
       outcome:
         trace.outcome ?? "uncertain",
     };
+    if (settlement.outcome === "cancelled") (trace.webOrigin ?? trace).controlRevoked = true;
     const key = this.turnKey(activeTurn);
     if (this.terminalTurnKeys.has(key)) return;
     this.terminalTurnKeys.add(key);
@@ -3010,6 +3025,16 @@ export class PiWebRuntime implements WebRuntimeController {
     this.retainedRuntimes.add(runtime);
     const session = runtime.session;
     let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribeChildren = getSessionChildExecutionAdmission(session.sessionManager)?.subscribe(() => {
+      // Settlement releases the lease before dispatching the child's result.
+      // Let that callback admit its native parent continuation before cleanup.
+      queueMicrotask(() => {
+        if (!this.retainedRuntimes.has(runtime)) return;
+        clearTimeout(progressTimer);
+        progress();
+        this.releaseRetainedRuntime(runtime);
+      });
+    });
     const progress = () => {
       progressTimer = undefined;
       if (!this.retainedRuntimes.has(runtime)) return;
@@ -3050,7 +3075,11 @@ export class PiWebRuntime implements WebRuntimeController {
         progressTimer.unref();
       }
     });
-    this.retainedSubscriptions.set(runtime, () => { clearTimeout(progressTimer); unsubscribe(); });
+    this.retainedSubscriptions.set(runtime, () => {
+      clearTimeout(progressTimer);
+      unsubscribeChildren?.();
+      unsubscribe();
+    });
     this.releaseRetainedRuntime(runtime);
   }
 
@@ -3070,6 +3099,8 @@ export class PiWebRuntime implements WebRuntimeController {
   private releaseRetainedRuntime(runtime: AgentSessionRuntime) {
     if (!this.retainedRuntimes.has(runtime)) return;
     if (!runtime.session.isIdle || runtime.session.isStreaming || this.inFlightRuntimes.has(runtime)) return;
+    const children = getSessionChildExecutionAdmission(runtime.session.sessionManager)?.snapshot();
+    if (children && (children.held > 0 || children.queued > 0)) return;
     this.retainedSubscriptions.get(runtime)?.();
     this.retainedSubscriptions.delete(runtime);
     this.retainedRuntimes.delete(runtime);

@@ -232,9 +232,6 @@ export interface WebSettingsResourceCatalog {
 export interface WebOpenPiSetupProjection {
   webSearch?: { enabled: boolean };
   response?: MyPiSetupConfig["response"];
-  capabilities: {
-    discovery: "explicit" | "adaptive";
-  };
   suggestions: {
     enabled: boolean;
     model?: {
@@ -255,6 +252,7 @@ export interface WebOpenPiSetupProjection {
     webAuxiliaryWidth?: number;
     webChatFontSize: number;
     webExpandThinking: boolean;
+    webFollowUpBehavior?: "followUp" | "steer";
     webHiddenThinkingLevels?: readonly ReasoningLevel[];
     webPinnedSort?: "manual" | "updated";
     webSidebarGrouping?: "project" | "list";
@@ -318,6 +316,7 @@ export interface WebSettingsPreferencesPatch {
   auxiliaryWidth?: number;
   chatFontSize?: number;
   expandThinking?: boolean;
+  followUpBehavior?: "followUp" | "steer";
 }
 
 export interface WebProjectionTruncation {
@@ -335,6 +334,8 @@ export interface WebSessionProjection {
   entries: ReturnType<typeof projectEntry>[];
   bytes: number;
   truncation: WebProjectionTruncation;
+  /** Exact selected Session's live and persisted child history, independent of transcript pagination. */
+  capabilities?: WebCapabilitySnapshot;
   rerun?: { source: WebHistoryAnchor; mode: "edit" | "regenerate" };
   history?: {
     leafEntryId: string | null;
@@ -409,6 +410,10 @@ export interface WebMessageTruncation {
 }
 
 export interface WebLiveMessage {
+  /** Provider-reported accounting for this response, never Session totals. */
+  usage?: Partial<Pick<WebSessionUsage, "input" | "output" | "cacheRead" | "cacheWrite">>;
+  provider?: string;
+  model?: string;
   /** Pi's bounded native child ledger. Child result bodies are not persisted by Pi. */
   nestedCalls?: { calls: WebNestedToolCall[]; complete: boolean };
   webSearch?: (NativeSearchActivity & { beforePartIndex?: number })[];
@@ -571,6 +576,7 @@ export interface WebSnapshot {
     auxiliaryWidth?: number;
     chatFontSize?: number;
     expandThinking?: boolean;
+    followUpBehavior?: "followUp" | "steer";
     hiddenThinkingLevels?: readonly ReasoningLevel[];
     subagentResultDisplay?: "full" | "compact";
     bashToolDisplay?: "full" | "compact";
@@ -751,6 +757,33 @@ function detailsProjection(value: unknown) {
     value: budget.truncated ? undefined : projected,
     truncated: budget.truncated,
   };
+}
+
+/** Keep exact display facts when a completion's detailed evidence exceeds the budget. */
+function subagentDisplayDetails(value: unknown) {
+  const own = (object: unknown, key: string): unknown => object && typeof object === "object"
+    ? Object.getOwnPropertyDescriptor(object, key)?.value : undefined;
+  const results = own(value, "results");
+  const batch = Array.isArray(results);
+  const rows: Record<string, unknown>[] = [];
+  let bytes = 32;
+  const length = batch ? Math.min(results.length, WEB_MAX_STRUCTURED_ARRAY_ITEMS) : 1;
+  for (let index = 0; index < length; index++) {
+    const source = batch ? own(results, String(index)) : value;
+    const id = own(source, "id");
+    if (typeof id !== "string" || !id || id.length > 160 || /[\u0000-\u001f\u007f]/u.test(id)) continue;
+    const row: Record<string, unknown> = { id };
+    const title = own(source, "title");
+    if (typeof title === "string") row.title = boundedText(title, WEB_MAX_METADATA_TEXT);
+    const status = own(source, "status");
+    if (status === "done" || status === "error" || status === "running") row.status = status;
+    const outcome = own(source, "outcome");
+    if (outcome === "completed" || outcome === "interrupted" || outcome === "uncertain") row.outcome = outcome;
+    bytes += jsonByteLength(row) + 1;
+    if (bytes > WEB_MAX_DETAILS_BYTES) break;
+    rows.push(row);
+  }
+  return batch ? { results: rows } : rows[0];
 }
 
 /** Keep structured tool details only when they serialize small and clean. */
@@ -964,8 +997,21 @@ export function projectMessage(message: unknown, resolvePath?: (path: string) =>
       ? (message as Record<string, unknown>)
       : {};
   const content = projectContent(value, resolvePath);
+  const rawUsage = value.role === "assistant" && value.usage && typeof value.usage === "object"
+    ? value.usage as Record<string, unknown> : undefined;
+  const usage = rawUsage ? Object.fromEntries(
+    ["input", "output", "cacheRead", "cacheWrite"].flatMap((key) => {
+      const count = rawUsage[key];
+      return typeof count === "number" && Number.isFinite(count) && count >= 0 ? [[key, count]] : [];
+    }),
+  ) : undefined;
+  const placeholderUsage = (value.stopReason === "error" || value.stopReason === "aborted") &&
+    usage && !Object.values(usage).some((count) => count > 0);
   const webSearch = projectNativeSearch(value, content.parts.length);
   const details = detailsProjection(value.details);
+  if (details.truncated && value.role === "custom" && value.customType === "subagent-result") {
+    details.value = subagentDisplayDetails(value.details);
+  }
   const nestedCalls = value.role === "toolResult" ? projectNestedCalls(value.nestedCalls, resolvePath) : undefined;
   const role =
     typeof value.role === "string"
@@ -1002,6 +1048,9 @@ export function projectMessage(message: unknown, resolvePath?: (path: string) =>
     metadataTruncated || errorMessage?.truncated === true;
   return {
     role: role?.value,
+    ...(usage && !placeholderUsage && Object.keys(usage).length ? { usage } : {}),
+    ...(value.role === "assistant" && typeof value.provider === "string" ? { provider: value.provider.slice(0, WEB_MAX_METADATA_TEXT) } : {}),
+    ...(value.role === "assistant" && typeof value.model === "string" ? { model: value.model.slice(0, WEB_MAX_METADATA_TEXT) } : {}),
     ...(nestedCalls ? { nestedCalls } : {}),
     ...(webSearch ? { webSearch } : {}),
     ...(typeof value.timestamp === "number" && Number.isFinite(value.timestamp) ? { timestamp: value.timestamp } : {}),

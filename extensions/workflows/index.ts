@@ -858,7 +858,7 @@ export default function workflows(
     new Map<string, WorkflowDetails>(settledRuns.entriesArray());
   const registerStableToolFamily = () =>
     patchOwnedTools(pi, "workflows", {
-      enable: OPENPI_TOOL_SURFACE.workflows.entry,
+      enable: OPENPI_TOOL_SURFACE.workflows.resident,
     });
   const stripState = new WorkflowStripState();
   const statusWriter = createStatusWriter("workflows");
@@ -1207,6 +1207,7 @@ export default function workflows(
     for (const runId of listPersistedRunIds()) {
       const details = readPersistedWorkflowDetails(runId, {
         hydrateArtifacts: true,
+        sessionId,
       });
       if (!details || details.sessionId !== sessionId) {
         continue;
@@ -1486,9 +1487,9 @@ export default function workflows(
           details: compactWorkflowToolDetails(details),
         });
       };
-      const emit = (checkpoint = true) => {
+      const emit = (checkpoint = true, graphChanged = true) => {
         if (runSettled) return;
-        refreshWorkflowGraph(details);
+        if (graphChanged) refreshWorkflowGraph(details);
         if (checkpoint) persistence.checkpoint();
         if (emitTimer) return;
         emitTimer = setTimeout(
@@ -1639,6 +1640,17 @@ export default function workflows(
           transcript: [],
         };
         details.agents.push(record);
+        try {
+          pi.appendEntry("workflow-child", {
+            runId: details.runId,
+            sessionId: details.sessionId,
+            status: "running",
+            startedAt: details.startedAt,
+            agents: [{ index, label, state: "running", startedAt }],
+          });
+        } catch {
+          // Canonical execution remains in the run journal if catalog persistence fails.
+        }
         refreshWorkflowGraph(details);
         persistence.checkpoint({ immediate: true });
         emit(false);
@@ -2215,7 +2227,10 @@ export default function workflows(
                     record.contextWindow =
                       progress.contextWindow ?? record.contextWindow;
                     record.transcript = progress.transcript;
-                    emit();
+                    // Preview/usage/transcript updates do not change graph
+                    // identity, edges or execution state. Lifecycle emissions
+                    // and durable checkpoints still refresh the projection.
+                    emit(true, false);
                   },
                 });
               const outcome = operatorKey

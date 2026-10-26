@@ -41,6 +41,7 @@ import type {
   SubagentOrigin,
   SubagentMeta,
   SubagentSnapshot,
+  SubagentSpend,
   SubagentStatus,
   TranscriptItem,
 } from "./domain.ts";
@@ -107,6 +108,7 @@ interface MutableSnapshot {
   worktreeBaseSha?: string;
   requestedCwd?: string;
   runGeneration?: number;
+  runStartEntryId?: string | null;
   completionGeneration?: number;
   evidence?: SubagentSnapshot["evidence"];
   runTranscriptStart: number;
@@ -115,6 +117,7 @@ interface MutableSnapshot {
   errorText?: string;
   meta: SubagentMeta;
   usage: { tokens?: number; contextWindow?: number };
+  spend?: SubagentSpend;
   transcript: TranscriptItem[];
   /** Bumped on every transcript mutation; UI caches key on this. */
   transcriptVersion: number;
@@ -132,6 +135,7 @@ interface Entry {
   scope: Scope.Closeable;
   pump?: Fiber.Fiber<void>;
   liveToolMap: Map<string, LiveToolState>;
+  retainedRenderTools: Set<string>;
   /** Idle restart dispatched but RunStarted not folded yet; counts as running
    * so concurrent restarts cannot race past the cap. */
   restarting?: boolean;
@@ -227,7 +231,7 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
     const listeners = new Set<() => void>();
     /** One-shot nextChange waiters, swapped out before invocation so waiters
      * re-registering during notification are not visited in the same sweep. */
-    let changeWaiters: Array<() => void> = [];
+    let changeWaiters: Array<{ ready: () => boolean; resume: () => void }> = [];
     const idListeners = new Map<string, Set<() => void>>();
     const cleanups = new Set<Fiber.Fiber<unknown>>();
     let modelCounter = config.initialModelCounter ?? 0;
@@ -244,7 +248,10 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
     const notify = (id?: string) => {
       const waiters = changeWaiters;
       changeWaiters = [];
-      for (const waiter of waiters) waiter();
+      for (const waiter of waiters) {
+        if (waiter.ready()) waiter.resume();
+        else changeWaiters.push(waiter);
+      }
       for (const listener of [...listeners]) {
         try {
           listener();
@@ -268,14 +275,15 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
     const unsubscribeAdmission = config.admission?.subscribe(() => notify());
 
     /** Resolves on the next state change. Interruption unregisters the waiter. */
-    const nextChange = Effect.callback<void>((resume) => {
-      const waiter = () => resume(Effect.void);
-      changeWaiters.push(waiter);
-      return Effect.sync(() => {
-        const index = changeWaiters.indexOf(waiter);
-        if (index >= 0) changeWaiters.splice(index, 1);
+    const nextChange = (ready = () => true) =>
+      Effect.callback<void>((resume) => {
+        const waiter = { ready, resume: () => resume(Effect.void) };
+        changeWaiters.push(waiter);
+        return Effect.sync(() => {
+          const index = changeWaiters.indexOf(waiter);
+          if (index >= 0) changeWaiters.splice(index, 1);
+        });
       });
-    });
 
     /**
      * A restart dispatched by `send` occupies a slot immediately, but the
@@ -422,6 +430,7 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
 
     const foldEvent = (entry: Entry, event: SubagentEvent) => {
       const s = entry.snapshot;
+      const transcriptVersion = s.transcriptVersion;
       switch (event._tag) {
         case "RunStarted":
           if (event.generation !== undefined) {
@@ -433,6 +442,7 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
             s.runTranscriptStart = s.transcriptVersion;
           }
           s.evidence = undefined;
+          s.runStartEntryId = event.startEntryId;
           entry.restarting = false;
           s.status = "running";
           s.outcome = undefined;
@@ -533,6 +543,7 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
             tokens: event.tokens ?? s.usage.tokens,
             contextWindow: event.contextWindow ?? s.usage.contextWindow,
           };
+          s.spend = event.spend ?? s.spend;
           break;
         case "MetaChanged":
           s.meta = { ...s.meta, ...event.meta };
@@ -540,6 +551,24 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
         case "BackendError":
           s.errorText = bounded(event.message);
           break;
+      }
+      if (s.transcriptVersion !== transcriptVersion) {
+        const retained = new Set(entry.liveToolMap.keys());
+        for (const item of s.transcript) {
+          if (item.kind === "toolResult") retained.add(item.toolId);
+          else if (item.kind === "assistant") {
+            for (const part of item.parts) {
+              if (part.type === "toolCall") retained.add(part.toolId);
+            }
+          }
+        }
+        // Backend events can be queued ahead of this projection. Release only
+        // IDs we actually observed leaving history, never unseen future data.
+        const evicted = new Set(
+          [...entry.retainedRenderTools].filter((id) => !retained.has(id)),
+        );
+        entry.session.toolRenderer?.releaseTools?.(evicted);
+        entry.retainedRenderTools = retained;
       }
       notify(s.id);
     };
@@ -649,6 +678,7 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
             session,
             scope,
             liveToolMap: new Map(),
+            retainedRenderTools: new Set(),
             ...(admissionLease ? { admissionLease } : {}),
           };
           entries.set(id, entry);
@@ -704,7 +734,9 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
             const pending = unique.filter((id) => isBusy(entries.get(id)));
             if (pending.length === 0) return;
             onPending?.(pending);
-            yield* nextChange;
+            yield* nextChange(() =>
+              pending.some((id) => !isBusy(entries.get(id))),
+            );
           }
         });
         return loop.pipe(
@@ -772,7 +804,7 @@ const makeManager = (config: SubagentManagerConfig = {}) =>
           yield* Effect.forEach(running, abortEntry, {
             concurrency: "unbounded",
           });
-          while (running.some(isBusy)) yield* nextChange;
+          while (running.some(isBusy)) yield* nextChange();
         });
         return work.pipe(
           Effect.ensuring(
