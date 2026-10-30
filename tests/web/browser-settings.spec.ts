@@ -102,16 +102,27 @@ it("separates installation evidence from authorization and guides setup without 
     ]),
   );
   expect(screen.queryByText("Connected")).toBeNull();
+  expect(window.open).not.toHaveBeenCalled();
   await within(guide).findByRole("heading", { name: "Turn on Developer mode" });
   fireEvent.click(within(guide).getByRole("button", { name: "It’s on. Next" }));
   expect(within(guide).getByText(state.extensionPath)).toBeTruthy();
-  fireEvent.click(within(guide).getByRole("button", { name: "Open folder" }));
+  fireEvent.click(
+    within(guide).getByRole("button", { name: "Locate extension" }),
+  );
   await waitFor(() =>
     expect(writes.at(-1)?.body).toEqual({
       browser: "chrome",
       action: "folder",
     }),
   );
+  expect(
+    within(guide).getByText("Drag the folder onto Chrome extensions"),
+  ).toBeTruthy();
+  expect(
+    within(guide).getByText(
+      "Select this entire folder, not a .js file inside it.",
+    ),
+  ).toBeTruthy();
   await waitFor(() =>
     expect(
       (
@@ -249,15 +260,14 @@ it("requests grants and default selection through setup without optimistic autho
   await waitFor(() =>
     expect(
       (
-        screen.getByRole("combobox", {
+        screen.getByRole("button", {
           name: "Default browser",
-        }) as HTMLSelectElement
+        }) as HTMLButtonElement
       ).disabled,
     ).toBe(false),
   );
-  fireEvent.change(screen.getByRole("combobox", { name: "Default browser" }), {
-    target: { value: "chrome" },
-  });
+  fireEvent.click(screen.getByRole("button", { name: "Default browser" }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "Chrome" }));
   await waitFor(() =>
     expect(requests[1]).toBe(
       'Configure browser access: browser_default="chrome". Preserve all other settings.',

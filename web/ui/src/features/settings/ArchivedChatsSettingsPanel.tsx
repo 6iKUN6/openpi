@@ -19,6 +19,7 @@ import {
   WebApiError,
   WebClient,
 } from "../../protocol/client.ts";
+import { SettingsSelect } from "./SettingsSelect.tsx";
 
 export function ArchivedChatsSettingsPanel({
   workspaces,
@@ -175,9 +176,10 @@ export function ArchivedChatsSettingsPanel({
 
   const groups = new Map<string, ArchivedSessionPage["sessions"]>();
   for (const session of visiblePage?.sessions ?? []) {
-    const list = groups.get(session.cwd) ?? [];
+    const project = session.workspacePath ?? session.cwd;
+    const list = groups.get(project) ?? [];
     list.push(session);
-    groups.set(session.cwd, list);
+    groups.set(project, list);
   }
   const workspaceName = (path: string) =>
     workspaces.find((item) => item.path === path)?.name ??
@@ -214,28 +216,29 @@ export function ArchivedChatsSettingsPanel({
             </button>
           )}
         </label>
-        <select
-          aria-label={t("archiveProjectFilter")}
+        <SettingsSelect
+          label={t("archiveProjectFilter")}
           value={cwd}
-          onChange={(event) => setCwd(event.target.value)}
-        >
-          <option value="">{t("archiveAllProjects")}</option>
-          {workspaceOptions.map((path) => (
-            <option key={path} value={path}>
-              {workspaceName(path)}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label={t("archiveSort")}
+          onChange={setCwd}
+          options={[
+            { value: "", label: t("archiveAllProjects") },
+            ...workspaceOptions.map((path) => ({
+              value: path,
+              label: workspaceName(path),
+            })),
+          ]}
+        />
+        <SettingsSelect
+          label={t("archiveSort")}
           value={sort}
-          onChange={(event) =>
-            setSort(event.target.value === "created" ? "created" : "updated")
+          onChange={(value) =>
+            setSort(value === "created" ? "created" : "updated")
           }
-        >
-          <option value="updated">{t("archiveSortUpdated")}</option>
-          <option value="created">{t("archiveSortCreated")}</option>
-        </select>
+          options={[
+            { value: "updated", label: t("archiveSortUpdated") },
+            { value: "created", label: t("archiveSortCreated") },
+          ]}
+        />
         <button
           type="button"
           className="icon-button"

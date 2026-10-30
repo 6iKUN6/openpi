@@ -26,10 +26,7 @@ import type {
 } from "../../web/protocol/types.ts";
 import { SessionSidebar } from "../../web/ui/src/features/sessions/SessionSidebar.tsx";
 import { i18n } from "../../web/ui/src/i18n.ts";
-import {
-  type ArchivedSessionPage,
-  WebClient,
-} from "../../web/ui/src/protocol/client.ts";
+import { WebClient } from "../../web/ui/src/protocol/client.ts";
 import { createWebStore } from "../../web/ui/src/store/web-store.ts";
 
 const cwd = "/repos/project";
@@ -51,9 +48,13 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 beforeEach(() => {
   vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  vi.spyOn(WebClient.prototype, "sessionOpenTargets").mockResolvedValue({
+    targets: [],
+  });
 });
 afterAll(() => {
   Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
@@ -75,33 +76,17 @@ function session(name: string, archived = false) {
     created: "2026-09-26T10:00:00Z",
     messageCount: 1,
     firstMessage: "hello",
+    readRevision: `revision:${cwd}/${name}.jsonl`,
   } satisfies WebSessionSummary;
 }
 
-function archivePage(
-  sessions: ArchivedSessionPage["sessions"],
-  nextCursor?: string,
-) {
-  return {
-    sessions: sessions.map((item) => ({ ...item })),
-    ...(nextCursor ? { nextCursor } : {}),
-    truncation: {
-      truncated: Boolean(nextCursor),
-      matchesOmitted: nextCursor ? 1 : 0,
-      recordsUnscanned: 0,
-      maxPageSize: 50,
-      maxScanned: 5_000,
-    },
-  } satisfies ArchivedSessionPage;
-}
-
-function mount(sessions = [session("First")]) {
+function mount(sessions: WebSessionSummary[] = [session("First")]) {
   const actions = createWebStore().getState().actions;
   const data = {
     protocolVersion: 1,
     generatedAt: "2026-09-26T10:00:00Z",
     cursor: 1,
-    preferences: { theme: "system" },
+    preferences: { theme: "system", projectsInRecents: false },
     workspaces: [{ path: cwd, name: "Project", current: false }],
     sessions,
     models: [],
@@ -136,6 +121,7 @@ function mount(sessions = [session("First")]) {
   const view = render(element());
   return {
     ...view,
+    data,
     actions,
     update(next: Partial<typeof props>) {
       Object.assign(props, next);
@@ -145,9 +131,9 @@ function mount(sessions = [session("First")]) {
 }
 
 async function openRename(name: string) {
-  const row = (await screen.findByText(name)).closest<HTMLElement>(
-    ".session-row",
-  );
+  const row = (
+    await screen.findByText(name, { selector: ".session-title" })
+  ).closest<HTMLElement>(".session-row");
   if (!row) throw new Error("Session row is missing");
   fireEvent.click(
     within(row).getByRole("button", {
@@ -156,10 +142,10 @@ async function openRename(name: string) {
   );
   fireEvent.click(
     await screen.findByRole("menuitem", {
-      name: i18n.t("renameConversation"),
+      name: i18n.t("sidebarRename"),
     }),
   );
-  return screen.getByRole<HTMLInputElement>("textbox", {
+  return screen.findByRole<HTMLInputElement>("textbox", {
     name: i18n.t("conversationName"),
   });
 }
@@ -183,6 +169,176 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+it("marks a conversation read against its exact revision, retries failure and waits for the backend projection before changing badges", async () => {
+  const receipt = {
+    commandId: "turn-42",
+    finishedAt: 42,
+    outcome: "completed" as const,
+    resultEntryId: "result-42",
+  };
+  const entry: WebSessionSummary = {
+    ...session("Result"),
+    unread: true,
+    execution: { status: "idle", lastTurn: receipt },
+  };
+  const view = mount([entry]);
+  const read = vi
+    .spyOn(view.actions, "setSessionRead")
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue();
+  const select = vi.spyOn(view.actions, "selectSession").mockResolvedValue();
+  const openMenu = () =>
+    fireEvent.click(
+      screen.getByRole("button", { name: i18n.t("conversationOptions") }),
+    );
+  openMenu();
+  fireEvent.click(
+    await screen.findByRole("menuitem", {
+      name: i18n.t("markConversationRead"),
+    }),
+  );
+  expect((await screen.findByRole("alert")).textContent).toBe(
+    i18n.t("sidebarReadFailed"),
+  );
+  expect(document.querySelector(".session-state-completed")).toBeTruthy();
+  expect(read).toHaveBeenCalledExactlyOnceWith(
+    entry.path,
+    entry.id,
+    true,
+    entry.readRevision,
+  );
+  openMenu();
+  fireEvent.click(
+    await screen.findByRole("menuitem", {
+      name: i18n.t("markConversationRead"),
+    }),
+  );
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(document.querySelector(".session-state-completed")).toBeTruthy();
+  const confirmed = { ...entry, unread: false, readRevision: "confirmed-read" };
+  view.update({ snapshot: { ...view.data, sessions: [confirmed] } });
+  expect(document.querySelector(".session-state-completed")).toBeNull();
+  openMenu();
+  fireEvent.click(
+    await screen.findByRole("menuitem", {
+      name: i18n.t("markConversationUnread"),
+    }),
+  );
+  await waitFor(() =>
+    expect(read).toHaveBeenLastCalledWith(
+      entry.path,
+      entry.id,
+      false,
+      confirmed.readRevision,
+    ),
+  );
+  expect(document.querySelector(".session-state-completed")).toBeNull();
+  view.update({
+    snapshot: {
+      ...view.data,
+      sessions: [{ ...entry, readRevision: "confirmed-unread" }],
+    },
+  });
+  expect(document.querySelector(".session-state-completed")).toBeTruthy();
+  expect(select).not.toHaveBeenCalled();
+});
+
+it.each([true, false])(
+  "disables a manual read-state write without a revision when unread is %s",
+  async (unread) => {
+    const view = mount([
+      { ...session("Legacy"), unread, readRevision: undefined },
+    ]);
+    const read = vi.spyOn(view.actions, "setSessionRead").mockResolvedValue();
+    fireEvent.click(
+      screen.getByRole("button", { name: i18n.t("conversationOptions") }),
+    );
+    const item = await screen.findByRole("menuitem", {
+      name: i18n.t(unread ? "markConversationRead" : "markConversationUnread"),
+    });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(item);
+    expect(read).not.toHaveBeenCalled();
+  },
+);
+
+it("marks only readable unread chats in the chosen project as read, including individually pinned chats", async () => {
+  const regular = { ...session("Regular"), unread: true };
+  const pinned = { ...session("Pinned"), unread: true, pinOrder: 0 };
+  const entries: WebSessionSummary[] = [
+    regular,
+    pinned,
+    { ...session("Already read"), unread: false },
+    { ...session("Archived", true), unread: true },
+    { ...session("Legacy"), unread: true, readRevision: undefined },
+    { ...session("Ungrouped"), unread: true, ungrouped: true },
+    {
+      ...session("Other project"),
+      cwd: "/repos/other",
+      path: "/repos/other/chat.jsonl",
+      readRevision: "other-project-revision",
+      unread: true,
+    },
+  ];
+  const view = mount(entries);
+  const read = vi.spyOn(view.actions, "setSessionRead").mockResolvedValue();
+  const select = vi.spyOn(view.actions, "selectSession").mockResolvedValue();
+  fireEvent.click(
+    within(screen.getByRole("region", { name: "Project" })).getByRole(
+      "button",
+      { name: i18n.t("workspaceOptions") },
+    ),
+  );
+  fireEvent.click(
+    await screen.findByRole("menuitem", { name: i18n.t("sidebarMarkAllRead") }),
+  );
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  expect(read.mock.calls).toEqual(
+    expect.arrayContaining([
+      [regular.path, regular.id, true, regular.readRevision],
+      [pinned.path, pinned.id, true, pinned.readRevision],
+    ]),
+  );
+  expect(select).not.toHaveBeenCalled();
+});
+
+it.each([
+  { name: "Command+K", key: "k", metaKey: true },
+  { name: "Control+K", key: "k", ctrlKey: true },
+  { name: "Command+Shift+P", key: "P", metaKey: true, shiftKey: true },
+])(
+  "leaves $name to the browser and opens search through its button",
+  ({ name: _name, ...keys }) => {
+    const { actions } = mount();
+    const select = vi.spyOn(actions, "selectSession").mockResolvedValue();
+    const trigger = screen.getByRole("button", {
+      name: i18n.t("searchConversations"),
+    });
+    trigger.focus();
+    fireEvent.keyDown(document, { ...keys, isComposing: true });
+    expect(
+      screen.queryByRole("dialog", { name: i18n.t("transcriptSearch") }),
+    ).toBeNull();
+    expect(fireEvent.keyDown(document, keys)).toBe(true);
+    expect(
+      screen.queryByRole("dialog", { name: i18n.t("transcriptSearch") }),
+    ).toBeNull();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", {
+      name: i18n.t("transcriptSearch"),
+    });
+    const input = within(dialog).getByRole("searchbox");
+    expect(document.activeElement).toBe(input);
+    expect(select).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(
+      screen.queryByRole("dialog", { name: i18n.t("transcriptSearch") }),
+    ).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  },
+);
 
 it("locks the exact rename form until its native write settles and admits one submission", async () => {
   const { actions } = mount();
@@ -279,202 +435,6 @@ it("does not read the archive list when a current Session is renamed", async () 
   expect(read).not.toHaveBeenCalled();
 });
 
-it("refreshes an archived rename through native pages without dropping the opened range or selecting it", async () => {
-  const records = Array.from({ length: 27 }, (_, index) =>
-    session(`Archived ${index + 1}`, true),
-  );
-  const read = vi
-    .spyOn(WebClient.prototype, "listArchivedSessions")
-    .mockImplementation(async ({ cursor } = {}) =>
-      cursor
-        ? archivePage(records.slice(25))
-        : archivePage(records.slice(0, 25), "second-page"),
-    );
-  const { actions } = mount([]);
-  const select = vi.spyOn(actions, "selectSession");
-  vi.spyOn(actions, "renameSession").mockImplementation(async (path, name) => {
-    const record = records.find((item) => item.path === path);
-    if (record) record.name = name;
-  });
-  fireEvent.click(
-    screen.getByRole("button", { name: i18n.t("archivedConversations") }),
-  );
-  await screen.findByText("Archived 1");
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("moreArchives") }));
-  await screen.findByText("Archived 27");
-  const input = await openRename("Archived 26");
-  fireEvent.change(input, { target: { value: "Revised archived" } });
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("save") }));
-  await screen.findByText("Revised archived");
-  expect(screen.getByText("Archived 1")).toBeTruthy();
-  expect(screen.getByText("Archived 27")).toBeTruthy();
-  expect(read).toHaveBeenCalledTimes(4);
-  expect(read.mock.calls.slice(2).map(([query]) => query)).toEqual([
-    { query: "", limit: 25 },
-    { query: "", cursor: "second-page", limit: 25 },
-  ]);
-  expect(select).not.toHaveBeenCalled();
-});
-
-it("re-evaluates the archive query after a matching title is renamed", async () => {
-  const record = session("Old match", true);
-  const read = vi
-    .spyOn(WebClient.prototype, "listArchivedSessions")
-    .mockImplementation(async ({ query = "" } = {}) =>
-      archivePage(
-        record.name.toLowerCase().includes(query.toLowerCase()) ? [record] : [],
-      ),
-    );
-  const view = mount([]);
-  view.update({ query: "Old", searchOpen: true });
-  vi.spyOn(view.actions, "renameSession").mockImplementation(
-    async (_path, name) => {
-      record.name = name;
-    },
-  );
-  fireEvent.click(
-    screen.getByRole("button", { name: i18n.t("archivedConversations") }),
-  );
-  const input = await openRename("Old match");
-  fireEvent.change(input, { target: { value: "New title" } });
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("save") }));
-  await screen.findByText(i18n.t("noMatching"));
-  expect(screen.queryByText("Old match")).toBeNull();
-  expect(screen.queryByText("New title")).toBeNull();
-  expect(read).toHaveBeenCalledTimes(2);
-  expect(read).toHaveBeenLastCalledWith(
-    { query: "Old", limit: 25 },
-    expect.any(AbortSignal),
-  );
-});
-
-it("does not refresh a different archive query after a late rename settles", async () => {
-  const pending = deferred<void>();
-  const read = vi
-    .spyOn(WebClient.prototype, "listArchivedSessions")
-    .mockImplementation(async ({ query = "" } = {}) =>
-      archivePage([
-        session(query === "Beta" ? "Beta title" : "Alpha title", true),
-      ]),
-    );
-  const view = mount([]);
-  vi.spyOn(view.actions, "renameSession").mockReturnValue(pending.promise);
-  view.update({ query: "Alpha", searchOpen: true });
-  fireEvent.click(
-    screen.getByRole("button", { name: i18n.t("archivedConversations") }),
-  );
-  const input = await openRename("Alpha title");
-  fireEvent.change(input, { target: { value: "Renamed Alpha" } });
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("save") }));
-  view.update({ query: "Beta" });
-  await screen.findByText("Beta title");
-  await act(async () => pending.resolve());
-  expect(read).toHaveBeenCalledTimes(2);
-  expect(screen.getByText("Beta title")).toBeTruthy();
-});
-
-it("keeps loaded rows and the retained range retry when a post-rename archive page fails", async () => {
-  // Two pages are sufficient to exercise retained-range retry. Rendering 50
-  // rows here spends the Windows timeout on DOM queries, not this contract.
-  // The preceding native-page test retains full 25-row pagination coverage.
-  const records = Array.from({ length: 4 }, (_, index) =>
-    session(`Archived ${index + 1}`, true),
-  );
-  const read = vi
-    .spyOn(WebClient.prototype, "listArchivedSessions")
-    .mockResolvedValueOnce(archivePage(records.slice(0, 2), "second-page"))
-    .mockResolvedValueOnce(archivePage(records.slice(2)))
-    .mockResolvedValueOnce(archivePage(records.slice(0, 2), "second-page"))
-    .mockRejectedValueOnce(new Error("offline"))
-    .mockResolvedValueOnce(archivePage(records.slice(0, 2), "second-page"))
-    .mockResolvedValueOnce(archivePage(records.slice(2)));
-  const { actions } = mount([]);
-  vi.spyOn(actions, "renameSession").mockResolvedValue();
-  fireEvent.click(
-    screen.getByRole("button", { name: i18n.t("archivedConversations") }),
-  );
-  await screen.findByText("Archived 1");
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("moreArchives") }));
-  await screen.findByText("Archived 4");
-  const input = await openRename("Archived 3");
-  fireEvent.change(input, { target: { value: "Revised" } });
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("save") }));
-  await screen.findByText(i18n.t("archiveLoadFailed"));
-  expect(screen.getByText("Archived 4")).toBeTruthy();
-  await waitFor(() =>
-    expect(
-      screen.queryByRole("dialog", { name: i18n.t("renameConversation") }),
-    ).toBeNull(),
-  );
-  expect(screen.queryByText(i18n.t("renameFailed"))).toBeNull();
-  fireEvent.click(
-    screen.getByRole("button", { name: i18n.t("retryArchives") }),
-  );
-  await waitFor(() => expect(read).toHaveBeenCalledTimes(6));
-  await waitFor(() =>
-    expect(screen.queryByText(i18n.t("archiveLoadFailed"))).toBeNull(),
-  );
-  expect(screen.getByText("Archived 4")).toBeTruthy();
-});
-
-it("aborts a retained-range refresh when the archive query changes and ignores its late second page", async () => {
-  const records = Array.from({ length: 27 }, (_, index) =>
-    session(`Alpha ${index + 1}`, true),
-  );
-  const pending = deferred<ArchivedSessionPage>();
-  let refreshSignal: AbortSignal | undefined;
-  const read = vi
-    .spyOn(WebClient.prototype, "listArchivedSessions")
-    .mockResolvedValueOnce(archivePage(records.slice(0, 25), "second-page"))
-    .mockResolvedValueOnce(archivePage(records.slice(25)))
-    .mockResolvedValueOnce(archivePage(records.slice(0, 25), "second-page"))
-    .mockImplementationOnce((_query, signal) => {
-      refreshSignal = signal;
-      return pending.promise;
-    })
-    .mockResolvedValueOnce(archivePage([session("Beta result", true)]));
-  const view = mount([]);
-  view.update({ query: "Alpha", searchOpen: true });
-  vi.spyOn(view.actions, "renameSession").mockResolvedValue();
-  fireEvent.click(
-    screen.getByRole("button", {
-      name: i18n.t("archivedConversations"),
-    }),
-  );
-  await screen.findByText("Alpha 1");
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("moreArchives") }));
-  await screen.findByText("Alpha 27");
-  const input = await openRename("Alpha 26");
-  fireEvent.change(input, { target: { value: "Renamed Alpha" } });
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("save") }));
-  await waitFor(() => expect(read).toHaveBeenCalledTimes(4));
-  view.update({ query: "Beta" });
-  expect(refreshSignal?.aborted).toBe(true);
-  await screen.findByText("Beta result");
-  await act(async () => pending.resolve(archivePage(records.slice(25))));
-  expect(screen.getByText("Beta result")).toBeTruthy();
-  expect(screen.queryByText("Alpha 27")).toBeNull();
-  expect(read).toHaveBeenCalledTimes(5);
-});
-
-it("does not start archive reads after an unmounted rename settles", async () => {
-  const pending = deferred<void>();
-  const read = vi
-    .spyOn(WebClient.prototype, "listArchivedSessions")
-    .mockResolvedValue(archivePage([session("Archived session", true)]));
-  const view = mount([]);
-  vi.spyOn(view.actions, "renameSession").mockReturnValue(pending.promise);
-  fireEvent.click(
-    screen.getByRole("button", { name: i18n.t("archivedConversations") }),
-  );
-  const input = await openRename("Archived session");
-  fireEvent.change(input, { target: { value: "Revised" } });
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("save") }));
-  view.unmount();
-  await act(async () => pending.resolve());
-  expect(read).toHaveBeenCalledTimes(1);
-});
-
 it("calls the operation removal, identifies its path, and waits for one result before closing", async () => {
   const { actions } = mount();
   const pending = deferred<boolean>();
@@ -564,25 +524,16 @@ const createdTarget = {
 };
 
 it.each(["global", "workspace"] as const)(
-  "returns the %s new-Session entry to the current unfiltered list only after creation is confirmed",
+  "clears the %s new-Session entry's current-list search only after creation is confirmed",
   async (entry) => {
-    vi.spyOn(WebClient.prototype, "listArchivedSessions").mockResolvedValue(
-      archivePage([session("Archived task", true)]),
-    );
     const pending = deferred<typeof createdTarget>();
     const view = mount();
-    view.update({ query: "Archived", searchOpen: true });
+    view.update({ query: "First", searchOpen: true });
     const create = vi
       .spyOn(view.actions, "createSession")
       .mockReturnValue(pending.promise);
     const query = vi.spyOn(view.actions, "setQuery");
     const select = vi.spyOn(view.actions, "selectSession");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: i18n.t("archivedConversations"),
-      }),
-    );
-    await screen.findByText("Archived task");
     const button = screen.getByRole<HTMLButtonElement>("button", {
       name:
         entry === "global"
@@ -598,18 +549,9 @@ it.each(["global", "workspace"] as const)(
     expect(button.disabled).toBe(true);
     expect(button.getAttribute("aria-busy")).toBe("true");
     expect(query).not.toHaveBeenCalled();
-    expect(
-      screen
-        .getByRole("button", { name: i18n.t("archivedConversations") })
-        .getAttribute("aria-pressed"),
-    ).toBe("true");
+    expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe("First");
     await act(async () => pending.resolve(createdTarget));
     expect(query).toHaveBeenCalledExactlyOnceWith("");
-    expect(
-      screen
-        .getByRole("button", { name: i18n.t("currentConversations") })
-        .getAttribute("aria-pressed"),
-    ).toBe("true");
     expect(
       screen.getByRole<HTMLButtonElement>("button", {
         name: i18n.t("newSession"),
@@ -620,114 +562,48 @@ it.each(["global", "workspace"] as const)(
 );
 
 it.each(["cancelled", "failed"] as const)(
-  "preserves the archive and search scope when new Session creation is %s",
+  "preserves the current-list search scope when new Session creation is %s",
   async (outcome) => {
-    vi.spyOn(WebClient.prototype, "listArchivedSessions").mockResolvedValue(
-      archivePage([session("Archived task", true)]),
-    );
     const view = mount();
-    view.update({ query: "Archived", searchOpen: true });
+    view.update({ query: "First", searchOpen: true });
     vi.spyOn(view.actions, "createSession").mockImplementation(async () => {
       if (outcome === "failed") throw new Error("offline");
       return null;
     });
     const query = vi.spyOn(view.actions, "setQuery");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: i18n.t("archivedConversations"),
-      }),
-    );
-    await screen.findByText("Archived task");
     const button = screen.getByRole<HTMLButtonElement>("button", {
       name: i18n.t("newSession"),
     });
     fireEvent.click(button);
     await waitFor(() => expect(button.disabled).toBe(false));
     expect(query).not.toHaveBeenCalled();
-    expect(
-      screen
-        .getByRole("button", { name: i18n.t("archivedConversations") })
-        .getAttribute("aria-pressed"),
-    ).toBe("true");
-    expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe(
-      "Archived",
-    );
+    expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe("First");
   },
 );
 
 it("keeps a newer search intention even when it returns to the original query before creation settles", async () => {
-  vi.spyOn(WebClient.prototype, "listArchivedSessions").mockResolvedValue(
-    archivePage([session("Archived task", true)]),
-  );
   const pending = deferred<typeof createdTarget>();
   const view = mount();
-  view.update({ query: "Archived", searchOpen: true });
+  view.update({ query: "First", searchOpen: true });
   vi.spyOn(view.actions, "createSession").mockReturnValue(pending.promise);
   const query = vi.spyOn(view.actions, "setQuery");
-  fireEvent.click(
-    screen.getByRole("button", { name: i18n.t("archivedConversations") }),
-  );
-  await screen.findByText("Archived task");
   fireEvent.click(screen.getByRole("button", { name: i18n.t("newSession") }));
   view.update({ query: "Other" });
-  view.update({ query: "Archived" });
+  view.update({ query: "First" });
   await act(async () => pending.resolve(createdTarget));
   expect(query).not.toHaveBeenCalled();
-  expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe(
-    "Archived",
-  );
-  expect(
-    screen
-      .getByRole("button", { name: i18n.t("archivedConversations") })
-      .getAttribute("aria-pressed"),
-  ).toBe("true");
-});
-
-it("keeps a newer view intention even when the reader leaves and returns to archives before creation settles", async () => {
-  vi.spyOn(WebClient.prototype, "listArchivedSessions").mockResolvedValue(
-    archivePage([session("Archived task", true)]),
-  );
-  const pending = deferred<typeof createdTarget>();
-  const view = mount();
-  view.update({ query: "Archived", searchOpen: true });
-  vi.spyOn(view.actions, "createSession").mockReturnValue(pending.promise);
-  const query = vi.spyOn(view.actions, "setQuery");
-  const archived = screen.getByRole("button", {
-    name: i18n.t("archivedConversations"),
-  });
-  fireEvent.click(archived);
-  await screen.findByText("Archived task");
-  fireEvent.click(screen.getByRole("button", { name: i18n.t("newSession") }));
-  fireEvent.click(
-    screen.getByRole("button", { name: i18n.t("currentConversations") }),
-  );
-  fireEvent.click(archived);
-  await screen.findByText("Archived task");
-  await act(async () => pending.resolve(createdTarget));
-  expect(query).not.toHaveBeenCalled();
-  expect(archived.getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe("First");
 });
 
 it("does not treat choosing a workspace as a confirmed new Session", async () => {
-  vi.spyOn(WebClient.prototype, "listArchivedSessions").mockResolvedValue(
-    archivePage([session("Archived task", true)]),
-  );
   const view = mount();
-  view.update({ selectedWorkspace: null, query: "Archived", searchOpen: true });
+  view.update({ selectedWorkspace: null, query: "First", searchOpen: true });
   const choose = vi.spyOn(view.actions, "chooseWorkspace").mockResolvedValue();
   const create = vi.spyOn(view.actions, "createSession");
   const query = vi.spyOn(view.actions, "setQuery");
-  fireEvent.click(
-    screen.getByRole("button", { name: i18n.t("archivedConversations") }),
-  );
-  await screen.findByText("Archived task");
   fireEvent.click(screen.getByRole("button", { name: i18n.t("newSession") }));
   await waitFor(() => expect(choose).toHaveBeenCalledOnce());
   expect(create).not.toHaveBeenCalled();
   expect(query).not.toHaveBeenCalled();
-  expect(
-    screen
-      .getByRole("button", { name: i18n.t("archivedConversations") })
-      .getAttribute("aria-pressed"),
-  ).toBe("true");
+  expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe("First");
 });

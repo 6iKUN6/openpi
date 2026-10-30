@@ -1,4 +1,9 @@
-import { ChevronRight, Plus, Trash2 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+} from "@astryxdesign/core/DropdownMenu";
+import { MODEL_THINKING_LEVELS } from "@earendil-works/pi-ai/providers/model-schema";
+import { Check, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { WebModelSummary } from "../../../../protocol/types.ts";
@@ -11,6 +16,7 @@ import { WebApiError, WebClient } from "../../protocol/client.ts";
 import { ProviderModelPicker } from "./ProviderModelPicker.tsx";
 import { ProviderAccountLogin } from "./ProviderAccountLogin.tsx";
 import { formatModelCapacity, parseModelCapacity } from "./model-capacity.ts";
+import { SettingsSelect } from "./SettingsSelect.tsx";
 
 export function ProviderConfigurationCard({
   sessionId,
@@ -154,6 +160,18 @@ export function ProviderConfigurationCard({
         at === index ? { ...model, ...patch } : model,
       ),
     });
+  const thinkingDefaults = draft.models.map(
+    (model) =>
+      configuration.thinkingDefaults?.[`${model.provider}/${model.id}`],
+  );
+  const thinkingSelections = draft.models.map((model, index) => {
+    const map = model.thinkingLevelMap ?? thinkingDefaults[index];
+    return MODEL_THINKING_LEVELS.filter(
+      (level) =>
+        map?.[level] !== null &&
+        ((level !== "xhigh" && level !== "max") || map?.[level] !== undefined),
+    );
+  });
   const template: WebModelConfiguration = {
     id: "",
     name: "",
@@ -255,13 +273,17 @@ export function ProviderConfigurationCard({
     </label>
   );
   const apiField = (
-    <label className="models-field">
+    <label
+      className="models-field"
+      htmlFor={`provider-api-${providerId || "custom"}`}
+    >
       {t("modelConfig_api")}
-      <select
+      <SettingsSelect
+        id={`provider-api-${providerId || "custom"}`}
+        label={t("modelConfig_api")}
         value={draft.api}
         disabled={profileDisabled}
-        onChange={(event) => {
-          const api = event.target.value;
+        onChange={(api) => {
           if (
             api === "openai-responses" ||
             api === "openai-completions" ||
@@ -269,11 +291,15 @@ export function ProviderConfigurationCard({
           )
             update({ api });
         }}
-      >
-        <option value="openai-completions">OpenAI Chat Completions</option>
-        <option value="openai-responses">OpenAI Responses</option>
-        <option value="anthropic-messages">Anthropic Messages</option>
-      </select>
+        options={[
+          {
+            value: "openai-completions",
+            label: "OpenAI Chat Completions",
+          },
+          { value: "openai-responses", label: "OpenAI Responses" },
+          { value: "anthropic-messages", label: "Anthropic Messages" },
+        ]}
+      />
     </label>
   );
   const modelList = (
@@ -301,8 +327,19 @@ export function ProviderConfigurationCard({
         </p>
       )}
       <div className="models-entry-list">
+        {currentModel && (
+          <p className="models-hint">
+            {t("providerCurrentSessionModel", {
+              model: `${currentModel.provider} / ${currentModel.id}`,
+            })}
+          </p>
+        )}
         {draft.models.map((model, index) => (
           <div className="models-entry" key={model.rowKey}>
+            {currentModel?.provider === draft.provider &&
+              currentModel.id === model.id && (
+                <p className="models-current-label">{t("currentModel")}</p>
+              )}
             <div className="models-entry-row">
               <input
                 aria-label={t("providerModelId", { number: index + 1 })}
@@ -420,7 +457,9 @@ export function ProviderConfigurationCard({
                             [key]: text,
                           },
                         }));
-                        updateModel(index, { [key]: parseModelCapacity(text) });
+                        updateModel(index, {
+                          [key]: parseModelCapacity(text),
+                        });
                       }}
                     />
                   </label>
@@ -483,6 +522,97 @@ export function ProviderConfigurationCard({
                 <p className="models-hint models-capability-hint">
                   {t("providerReasoningHint")}
                 </p>
+                {model.reasoning && (
+                  <div className="models-thinking-levels">
+                    <div className="models-thinking-copy">
+                      <strong>{t("providerThinkingLevels")}</strong>
+                      <p className="models-hint">
+                        {t("providerThinkingLevelsHint")}
+                      </p>
+                    </div>
+                    <DropdownMenu
+                      button={{
+                        label:
+                          model.thinkingLevelMap == null
+                            ? t("providerThinkingAutomatic")
+                            : t("providerThinkingSelected", {
+                                count: thinkingSelections[index]!.length,
+                              }),
+                        "aria-label": t("providerCapacityLabel", {
+                          field: t("providerThinkingLevels"),
+                          number: index + 1,
+                        }),
+                        variant: "secondary",
+                        size: "sm",
+                        className: "models-thinking-trigger",
+                        isDisabled: profileDisabled,
+                      }}
+                      className="configuration-level-menu"
+                      menuWidth="min(240px, calc(100vw - 32px))"
+                      alignment="end"
+                    >
+                      {MODEL_THINKING_LEVELS.map((level) => {
+                        const selectedThinkingLevels =
+                          thinkingSelections[index]!;
+                        const checked = selectedThinkingLevels.includes(level);
+                        return (
+                          <DropdownMenuCheckboxItem
+                            key={level}
+                            label={level}
+                            value={checked}
+                            isDisabled={
+                              profileDisabled ||
+                              (checked && selectedThinkingLevels.length === 1)
+                            }
+                            endContent={
+                              <span className="configuration-check">
+                                {checked && <Check aria-hidden="true" />}
+                              </span>
+                            }
+                            onChange={(enabled: boolean) => {
+                              updateModel(index, {
+                                thinkingLevelMap: Object.fromEntries(
+                                  MODEL_THINKING_LEVELS.map((native) => {
+                                    const included =
+                                      native === level
+                                        ? enabled
+                                        : selectedThinkingLevels.includes(
+                                            native,
+                                          );
+                                    const original = baseline.models.find(
+                                      (entry) => entry.rowKey === model.rowKey,
+                                    )?.thinkingLevelMap?.[native];
+                                    return [
+                                      native,
+                                      included
+                                        ? (model.thinkingLevelMap?.[native] ??
+                                          original ??
+                                          thinkingDefaults[index]?.[native] ??
+                                          (native === "off" ? "none" : native))
+                                        : null,
+                                    ];
+                                  }),
+                                ),
+                              });
+                            }}
+                          />
+                        );
+                      })}
+                    </DropdownMenu>
+                    {model.thinkingLevelMap != null && (
+                      <button
+                        type="button"
+                        className="models-link models-thinking-reset"
+                        disabled={profileDisabled}
+                        onClick={() =>
+                          updateModel(index, { thinkingLevelMap: null })
+                        }
+                      >
+                        {t("providerThinkingReset")}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

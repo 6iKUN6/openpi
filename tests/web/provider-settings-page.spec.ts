@@ -11,7 +11,11 @@ import {
 import { createElement } from "react";
 import { I18nextProvider } from "react-i18next";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
-import type { WebModelSummary } from "../../web/protocol/types.ts";
+import type {
+  WebModelSummary,
+  WebSettingsCatalog,
+} from "../../web/protocol/types.ts";
+import { AppearanceSettingsPanel } from "../../web/ui/src/features/settings/AppearanceSettingsPanel.tsx";
 import { ProviderSettingsPage } from "../../web/ui/src/features/settings/ProviderSettingsPage.tsx";
 import { i18n } from "../../web/ui/src/i18n.ts";
 
@@ -144,7 +148,12 @@ it("offers current-model native search with no external provider installation", 
   );
   await screen.findByText(i18n.t("webSearchDefaultOff"));
   expect(configure).not.toHaveBeenCalled();
-  expect(screen.getAllByText(i18n.t("webSearchCurrentModel")).length).toBe(2);
+  expect(
+    screen.getByRole("heading", {
+      name: i18n.t("webSearchCurrentModel"),
+      level: 2,
+    }),
+  ).toBeTruthy();
   expect(screen.getByText(i18n.t("webSearchSupported"))).toBeTruthy();
   expect(screen.queryByText("npm:pi-web-access@0.38.0")).toBeNull();
   const enable = screen.getByRole("button", {
@@ -266,7 +275,12 @@ function settingsFetcher(payload = settingsPayload()) {
       Object.assign(payload.setup.ui, {
         ...(patch.theme !== undefined ? { webTheme: patch.theme } : {}),
         ...(patch.appearance !== undefined
-          ? { webAppearance: patch.appearance }
+          ? {
+              webAppearance: {
+                ...payload.setup.ui.webAppearance,
+                ...patch.appearance,
+              },
+            }
           : {}),
         ...(patch.chatWidth !== undefined
           ? { webChatWidth: patch.chatWidth }
@@ -276,6 +290,9 @@ function settingsFetcher(payload = settingsPayload()) {
           : {}),
         ...(patch.expandThinking !== undefined
           ? { webExpandThinking: patch.expandThinking }
+          : {}),
+        ...(patch.followUpBehavior !== undefined
+          ? { webFollowUpBehavior: patch.followUpBehavior }
           : {}),
         ...Object.fromEntries(
           [
@@ -525,7 +542,9 @@ it("C08 retains a failed reasoning display preference and retries through the pr
             JSON.stringify({ error: "Fixture save failure" }),
             { status: 500 },
           );
-        payload.setup.ui.webHiddenThinkingLevels = patch.hiddenThinkingLevels;
+        payload.setup.ui.webHiddenThinkingLevels = [
+          patch.thinkingLevelVisibility.level,
+        ];
         return reply({ saved: true, setup: payload.setup });
       }
       return fetcher(input, init);
@@ -553,8 +572,8 @@ it("C08 retains a failed reasoning display preference and retries through the pr
   await screen.findByText(i18n.t("settingsPreferencesSaved"));
   expect(max.getAttribute("aria-checked")).toBe("false");
   expect(patches).toEqual([
-    { hiddenThinkingLevels: ["max"] },
-    { hiddenThinkingLevels: ["max"] },
+    { thinkingLevelVisibility: { level: "max", visible: false } },
+    { thinkingLevelVisibility: { level: "max", visible: false } },
   ]);
   expect(configure).not.toHaveBeenCalled();
 });
@@ -585,7 +604,7 @@ it("C10 disables unsupported response controls and never offers editable permiss
     screen.getByText(i18n.t("configurationSandboxUnavailable")),
   ).toBeTruthy();
   expect(
-    screen.queryByRole("combobox", { name: i18n.t("configurationApproval") }),
+    screen.queryByRole("button", { name: i18n.t("configurationApproval") }),
   ).toBeNull();
   expect(
     screen.queryByRole("switch", { name: i18n.t("configurationDependencies") }),
@@ -665,6 +684,18 @@ it("submits role and skill changes through the canonical setup entry", async () 
   fireEvent.click(
     screen.getByRole("tab", { name: i18n.t("subagentsSettings") }),
   );
+  fireEvent.click(screen.getByRole("button", { name: i18n.t("builtInRoles") }));
+  fireEvent.click(
+    screen.getByRole("menuitemradio", {
+      name: i18n.t("subagentRole_reviewer"),
+    }),
+  );
+  expect(
+    screen.getByRole("heading", {
+      name: i18n.t("subagentRole_reviewer"),
+      level: 2,
+    }),
+  ).toBeTruthy();
   fireEvent.change(screen.getByLabelText(i18n.t("workflowConcurrencyLabel")), {
     target: { value: "3" },
   });
@@ -672,7 +703,9 @@ it("submits role and skill changes through the canonical setup entry", async () 
     screen.getByRole("button", { name: i18n.t("configureViaSetup") }),
   );
   await waitFor(() =>
-    expect(configure).toHaveBeenCalledWith(expect.stringContaining("3")),
+    expect(configure).toHaveBeenCalledWith(
+      expect.stringMatching(/reviewer.*3/u),
+    ),
   );
   fireEvent.click(screen.getByRole("tab", { name: i18n.t("skillsSettings") }));
   fireEvent.click(
@@ -718,6 +751,244 @@ it("filters settings by translated setting names and preserves the active page u
     screen.getByRole("button", { name: i18n.t("settingsClearSearch") }),
   );
   expect(screen.getAllByRole("tab")).toHaveLength(10);
+});
+
+it.each([
+  { language: "en", queries: ["runtime", "version", "build"] },
+  { language: "zh", queries: ["运行信息", "版本", "构建"] },
+])(
+  "finds runtime information from settings search in $language",
+  async ({ language, queries }) => {
+    const previousLanguage = i18n.language;
+    await i18n.changeLanguage(language);
+    try {
+      vi.stubGlobal("fetch", settingsFetcher());
+      renderSettings({ entry: "appearance" });
+      const search = screen.getByRole("searchbox", {
+        name: i18n.t("settingsSearch"),
+      });
+      for (const query of queries) {
+        fireEvent.change(search, { target: { value: query } });
+        fireEvent.click(
+          screen.getByRole("tab", { name: i18n.t("generalSettings") }),
+        );
+        expect(
+          screen.getByRole("region", { name: i18n.t("runtimeIdentity") }),
+        ).toBeTruthy();
+        expect((search as HTMLInputElement).value).toBe("");
+      }
+    } finally {
+      cleanup();
+      await i18n.changeLanguage(previousLanguage);
+    }
+  },
+);
+
+it.each([
+  { setupWritable: false, settingsErrors: 0 },
+  { setupWritable: true, settingsErrors: 1 },
+])(
+  "blocks unreadable appearance preferences and recovers after refresh: %j",
+  ({ setupWritable, settingsErrors }) => {
+    const catalog = settingsPayload() as WebSettingsCatalog;
+    const onRefresh = vi.fn();
+    const onUpdatePreferences = vi.fn(async () => true);
+    const element = (unreadable: boolean) =>
+      createElement(
+        I18nextProvider,
+        { i18n },
+        createElement(AppearanceSettingsPanel, {
+          catalog: {
+            ...catalog,
+            setupWritable: unreadable ? setupWritable : true,
+            resources: {
+              ...catalog.resources,
+              diagnostics: {
+                ...catalog.resources.diagnostics,
+                settingsErrors: unreadable ? settingsErrors : 0,
+              },
+            },
+          },
+          theme: "system",
+          pending: false,
+          error: null,
+          onRefresh,
+          onUpdatePreferences,
+        }),
+      );
+    const view = render(element(true));
+    expect(screen.getByRole("alert").textContent).toContain(
+      i18n.t("configurationReadFailure"),
+    );
+    for (const radio of screen.getAllByRole<HTMLInputElement>("radio"))
+      expect(radio.disabled).toBe(true);
+    expect(
+      screen.getByRole<HTMLInputElement>("radio", {
+        name: i18n.t("themeMist"),
+      }).disabled,
+    ).toBe(true);
+    expect(
+      screen.getByRole<HTMLInputElement>("textbox", {
+        name: i18n.t("appearanceBackground"),
+      }).disabled,
+    ).toBe(true);
+    fireEvent.click(
+      screen.getByRole("button", { name: i18n.t("retryAdmissionCheck") }),
+    );
+    expect(onRefresh).toHaveBeenCalledOnce();
+    expect(onUpdatePreferences).not.toHaveBeenCalled();
+    view.rerender(element(false));
+    expect(screen.queryByRole("alert")).toBeNull();
+    const dark = screen.getByRole<HTMLInputElement>("radio", {
+      name: i18n.t("themeDark"),
+    });
+    expect(dark.disabled).toBe(false);
+    fireEvent.click(dark);
+    expect(onUpdatePreferences).toHaveBeenCalledWith({ theme: "dark" });
+  },
+);
+
+it.each([
+  { menu: "appearanceAccent", option: "appearanceAccent1", readonly: false },
+  { menu: "appearanceFont", option: "appearanceFont_serif", readonly: false },
+  { menu: "appearanceFont", option: "appearanceFont_serif", readonly: true },
+])(
+  "blocks an already-open appearance menu after pending/read-only changes: %j",
+  async ({ menu, option, readonly }) => {
+    const catalog = settingsPayload() as WebSettingsCatalog;
+    const onUpdatePreferences = vi.fn(async () => true);
+    const element = (blocked: boolean) =>
+      createElement(
+        I18nextProvider,
+        { i18n },
+        createElement(AppearanceSettingsPanel, {
+          catalog: {
+            ...catalog,
+            setupWritable: !(blocked && readonly),
+          },
+          theme: "system",
+          pending: blocked && !readonly,
+          error: null,
+          onRefresh: vi.fn(),
+          onUpdatePreferences,
+        }),
+      );
+    const view = render(element(false));
+    fireEvent.click(screen.getByRole("button", { name: i18n.t(menu) }));
+    const choice = await screen.findByRole("menuitem", {
+      name: i18n.t(option),
+    });
+    view.rerender(element(true));
+    expect(choice.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(choice);
+    fireEvent.keyDown(choice, { key: "Enter" });
+    expect(onUpdatePreferences).not.toHaveBeenCalled();
+  },
+);
+
+it("sends only the edited appearance field or mode, including legacy themes", async () => {
+  const catalog = settingsPayload() as WebSettingsCatalog;
+  catalog.setup.ui.webTheme = "pine";
+  const onUpdatePreferences = vi.fn(async () => true);
+  render(
+    createElement(
+      I18nextProvider,
+      { i18n },
+      createElement(AppearanceSettingsPanel, {
+        catalog,
+        theme: "pine",
+        pending: false,
+        error: null,
+        onRefresh: vi.fn(),
+        onUpdatePreferences,
+      }),
+    ),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: i18n.t("appearanceFont") }),
+  );
+  fireEvent.click(
+    await screen.findByRole("menuitem", {
+      name: i18n.t("appearanceFont_serif"),
+    }),
+  );
+  expect(onUpdatePreferences).toHaveBeenLastCalledWith({
+    appearance: { font: "serif" },
+  });
+  fireEvent.change(
+    screen.getByRole("textbox", { name: i18n.t("appearanceBackground") }),
+    { target: { value: "#112233" } },
+  );
+  expect(onUpdatePreferences).toHaveBeenLastCalledWith({
+    appearance: { background: "#112233" },
+  });
+  fireEvent.click(screen.getByRole("radio", { name: i18n.t("themeMist") }));
+  expect(onUpdatePreferences).toHaveBeenLastCalledWith({
+    appearance: { palette: "mist" },
+  });
+  fireEvent.click(screen.getByRole("radio", { name: i18n.t("themeLight") }));
+  expect(onUpdatePreferences).toHaveBeenLastCalledWith({ theme: "light" });
+});
+
+it("saves palette cards through the existing writer and keeps the saved palette after a failed write", async () => {
+  const fallback = settingsFetcher();
+  let fail = false;
+  let finishWrite: (() => void) | undefined;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/settings/preferences")) {
+        await new Promise<void>((resolve) => {
+          finishWrite = resolve;
+        });
+        if (fail)
+          return new Response(JSON.stringify({ error: "failed" }), {
+            status: 422,
+          });
+      }
+      return fallback(input, init);
+    }),
+  );
+  const view = renderSettings();
+  await screen.findByText(i18n.t("agentBehavior"));
+  openAppearance();
+  const group = () =>
+    within(screen.getByRole("radiogroup", { name: i18n.t("appearanceTheme") }));
+  expect(group().getAllByRole("radio")).toHaveLength(4);
+  fireEvent.click(group().getByRole("radio", { name: i18n.t("themeMist") }));
+  await waitFor(() => expect(finishWrite).toBeTypeOf("function"));
+  for (const radio of group().getAllByRole<HTMLInputElement>("radio"))
+    expect(radio.disabled).toBe(true);
+  await act(async () => finishWrite?.());
+  await waitFor(() =>
+    expect(
+      group().getByRole<HTMLInputElement>("radio", {
+        name: i18n.t("themeMist"),
+      }).checked,
+    ).toBe(true),
+  );
+  view.unmount();
+  renderSettings();
+  await screen.findByText(i18n.t("agentBehavior"));
+  openAppearance();
+  expect(
+    group().getByRole<HTMLInputElement>("radio", { name: i18n.t("themeMist") })
+      .checked,
+  ).toBe(true);
+  fail = true;
+  finishWrite = undefined;
+  fireEvent.click(group().getByRole("radio", { name: i18n.t("themeRose") }));
+  await waitFor(() => expect(finishWrite).toBeTypeOf("function"));
+  await act(async () => finishWrite?.());
+  await screen.findByText(i18n.t("settingsPreferencesSaveFailed"));
+  expect(
+    group().getByRole<HTMLInputElement>("radio", { name: i18n.t("themeMist") })
+      .checked,
+  ).toBe(true);
+  expect(
+    group().getByRole<HTMLInputElement>("radio", { name: i18n.t("themeRose") })
+      .checked,
+  ).toBe(false);
 });
 
 it("validates and cancels theme imports without writes; a failed valid import keeps its draft and saved mode", async () => {
@@ -823,6 +1094,69 @@ it("commits only complete color values and rolls a failed change back to canonic
   await waitFor(() => expect(color.value).toBe("#FFFFFF"));
 });
 
+it.each(["color", "width", "fontSize"])(
+  "preserves a newer canonical %s when an earlier appearance save fails",
+  async (field) => {
+    const catalog = settingsPayload() as WebSettingsCatalog;
+    catalog.setup.ui.webChatWidth = 1200;
+    catalog.setup.ui.webChatFontSize = 18;
+    const save = Promise.withResolvers<boolean>();
+    const onUpdatePreferences = vi.fn(() => save.promise);
+    const element = (current: WebSettingsCatalog, pending: boolean) =>
+      createElement(
+        I18nextProvider,
+        { i18n },
+        createElement(AppearanceSettingsPanel, {
+          catalog: current,
+          theme: "system",
+          pending,
+          error: null,
+          onRefresh: vi.fn(),
+          onUpdatePreferences,
+        }),
+      );
+    const view = render(element(catalog, false));
+    fireEvent.click(
+      screen.getByRole("button", { name: i18n.t("appearanceAdvanced") }),
+    );
+    const color = screen.getByRole<HTMLInputElement>("textbox", {
+      name: i18n.t("appearanceBackground"),
+    });
+    if (field === "color")
+      fireEvent.change(color, { target: { value: "#AABBCC" } });
+    else
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: i18n.t(
+            field === "width" ? "resetChatContentWidth" : "resetChatFontSize",
+          ),
+        }),
+      );
+    expect(onUpdatePreferences).toHaveBeenCalledOnce();
+    const newer = structuredClone(catalog);
+    newer.setup.ui.webAppearance = {
+      ...newer.setup.ui.webAppearance!,
+      background: "#112233",
+    };
+    newer.setup.ui.webChatWidth = 1500;
+    newer.setup.ui.webChatFontSize = 20;
+    view.rerender(element(newer, true));
+    expect(color.value).toBe("#112233");
+    await act(async () => save.resolve(false));
+    expect(color.value).toBe("#112233");
+    expect(
+      screen
+        .getByRole("slider", { name: i18n.t("chatContentWidth") })
+        .getAttribute("aria-valuenow"),
+    ).toBe("1500");
+    expect(
+      screen
+        .getByRole("slider", { name: i18n.t("chatFontSize") })
+        .getAttribute("aria-valuenow"),
+    ).toBe("20");
+  },
+);
+
 it("reviews an exact plugin source and scope without claiming installation or reusing an old setup failure", async () => {
   vi.stubGlobal("fetch", settingsFetcher());
   const configure = vi.fn(async () => true);
@@ -843,9 +1177,12 @@ it("reviews an exact plugin source and scope without claiming installation or re
   fireEvent.change(panel.getByLabelText(i18n.t("resourcePackageSource")), {
     target: { value: source },
   });
-  fireEvent.change(panel.getByLabelText(i18n.t("scope")), {
-    target: { value: "project" },
-  });
+  fireEvent.click(panel.getByRole("button", { name: i18n.t("scope") }));
+  fireEvent.click(
+    panel.getByRole("menuitemradio", {
+      name: i18n.t("resourceScope_project"),
+    }),
+  );
   fireEvent.click(
     panel.getByRole("button", {
       name: i18n.t("configureViaSetup"),
@@ -956,9 +1293,14 @@ it("filters skill bulk requests by scope and search while preserving the native 
   await screen.findByText(i18n.t("agentBehavior"));
   fireEvent.click(screen.getByRole("tab", { name: i18n.t("skillsSettings") }));
   const panel = within(screen.getByRole("tabpanel"));
-  fireEvent.change(panel.getByLabelText(i18n.t("filterResourceScope")), {
-    target: { value: "project" },
-  });
+  fireEvent.click(
+    panel.getByRole("button", { name: i18n.t("filterResourceScope") }),
+  );
+  fireEvent.click(
+    panel.getByRole("menuitemradio", {
+      name: i18n.t("resourceScope_project"),
+    }),
+  );
   fireEvent.change(panel.getByRole("searchbox"), {
     target: { value: "review" },
   });
@@ -999,6 +1341,30 @@ it("filters skill bulk requests by scope and search while preserving the native 
   ).toBeNull();
 });
 
+it("saves the follow-up behavior in General without starting a setup or model request", async () => {
+  const fetcher = settingsFetcher();
+  vi.stubGlobal("fetch", fetcher);
+  const onConfigureOpenPi = vi.fn(async () => true);
+  renderSettings({ onConfigureOpenPi });
+  const queue = await screen.findByRole<HTMLInputElement>("radio", {
+    name: i18n.t("followUpQueue"),
+  });
+  expect(queue.checked).toBe(true);
+  const steer = screen.getByRole<HTMLInputElement>("radio", {
+    name: i18n.t("followUpSteer"),
+  });
+  fireEvent.click(steer);
+  await waitFor(() => expect(steer.checked).toBe(true));
+  expect(
+    fetcher.mock.calls.some(
+      ([input, init]) =>
+        String(input).includes("/api/settings/preferences") &&
+        JSON.parse(String(init?.body)).followUpBehavior === "steer",
+    ),
+  ).toBe(true);
+  expect(onConfigureOpenPi).not.toHaveBeenCalled();
+});
+
 it("shows canonical General state and routes real setup/runtime actions", async () => {
   const fetcher = settingsFetcher();
   vi.stubGlobal("fetch", fetcher);
@@ -1033,7 +1399,13 @@ it("shows canonical General state and routes real setup/runtime actions", async 
   expect(within(generalPanel).getByText(/6 concurrent/u)).toBeTruthy();
   openAppearance();
   const appearancePanel = screen.getByRole("tabpanel");
-  expect(within(appearancePanel).getAllByRole("radio")).toHaveLength(3);
+  expect(
+    within(
+      within(appearancePanel).getByRole("radiogroup", {
+        name: i18n.t("appearanceMode"),
+      }),
+    ).getAllByRole("radio"),
+  ).toHaveLength(3);
   expect(within(appearancePanel).queryByRole("slider")).toBeNull();
   fireEvent.click(
     within(appearancePanel).getByRole("radio", { name: i18n.t("themeDark") }),
@@ -1196,30 +1568,36 @@ it("saves every result display and footer control through presentation preferenc
   renderSettings({ onConfigureOpenPi: configure });
   await screen.findByText(i18n.t("agentBehavior"));
   for (const label of ["subagentResults", "bashOperations", "fileMutations"]) {
-    const select = screen.getByRole<HTMLSelectElement>("combobox", {
+    const select = screen.getByRole<HTMLButtonElement>("button", {
       name: i18n.t(label),
     });
-    fireEvent.change(select, { target: { value: "full" } });
-    await waitFor(() => expect(select.value).toBe("full"));
+    fireEvent.click(select);
+    fireEvent.click(
+      screen.getByRole("menuitemradio", {
+        name: i18n.t("detailDisplay_full"),
+      }),
+    );
+    await waitFor(() =>
+      expect(select.textContent).toBe(i18n.t("detailDisplay_full")),
+    );
     await waitFor(() => expect(select.disabled).toBe(false));
   }
-  fireEvent.change(
-    screen.getByRole("combobox", { name: i18n.t("terminalFooterStyle") }),
-    { target: { value: "powerline-mono" } },
+  fireEvent.click(
+    screen.getByRole("button", { name: i18n.t("terminalFooterStyle") }),
   );
-  await waitFor(() =>
-    expect(
-      screen.getByRole<HTMLSelectElement>("combobox", {
-        name: i18n.t("terminalFooterStyle"),
-      }).value,
-    ).toBe("powerline-mono"),
+  fireEvent.click(
+    screen.getByRole("menuitemradio", { name: "Powerline Mono" }),
   );
+  const footerStyle = screen.getByRole<HTMLButtonElement>("button", {
+    name: i18n.t("terminalFooterStyle"),
+  });
+  await waitFor(() => expect(footerStyle.textContent).toBe("Powerline Mono"));
   fireEvent.click(
     screen.getByRole("switch", { name: i18n.t("terminalFooter") }),
   );
   await waitFor(() =>
     expect(
-      screen.getByRole<HTMLSelectElement>("combobox", {
+      screen.getByRole<HTMLButtonElement>("button", {
         name: i18n.t("terminalFooterStyle"),
       }).disabled,
     ).toBe(true),
@@ -1239,16 +1617,20 @@ it("saves every result display and footer control through presentation preferenc
         }),
     ),
   );
-  fireEvent.change(
-    screen.getByRole("combobox", { name: i18n.t("bashOperations") }),
-    { target: { value: "compact" } },
+  fireEvent.click(
+    screen.getByRole("button", { name: i18n.t("bashOperations") }),
+  );
+  fireEvent.click(
+    screen.getByRole("menuitemradio", {
+      name: i18n.t("detailDisplay_compact"),
+    }),
   );
   await screen.findByText(i18n.t("settingsPreferencesSaveFailed"));
   expect(
-    screen.getByRole<HTMLSelectElement>("combobox", {
+    screen.getByRole<HTMLButtonElement>("button", {
       name: i18n.t("bashOperations"),
-    }).value,
-  ).toBe("full");
+    }).textContent,
+  ).toBe(i18n.t("detailDisplay_full"));
 });
 
 it("routes agent controls through canonical setup and waits for a save receipt", async () => {
@@ -1257,30 +1639,26 @@ it("routes agent controls through canonical setup and waits for a save receipt",
   const configure = vi.fn(async () => true);
   renderSettings({ onConfigureOpenPi: configure });
   await screen.findByText(i18n.t("agentBehavior"));
-  const discovery = screen.getByRole<HTMLSelectElement>("combobox", {
-    name: i18n.t("capabilityDiscovery"),
-  });
-  fireEvent.change(discovery, { target: { value: "adaptive" } });
-  await waitFor(() =>
-    expect(configure).toHaveBeenCalledWith(
-      i18n.t("setupRequestDiscovery", { mode: "adaptive" }),
-    ),
-  );
-  expect(discovery.value).toBe("explicit");
   const concurrency = screen.getByRole<HTMLInputElement>("spinbutton", {
     name: i18n.t("workflowConcurrency"),
   });
+  await waitFor(() => expect(concurrency.value).toBe("6"));
   fireEvent.change(concurrency, { target: { value: "9" } });
-  fireEvent.change(
-    screen.getByRole("combobox", { name: i18n.t("bashOperations") }),
-    { target: { value: "full" } },
+  expect(concurrency.value).toBe("9");
+  fireEvent.click(
+    screen.getByRole("button", { name: i18n.t("bashOperations") }),
+  );
+  fireEvent.click(
+    screen.getByRole("menuitemradio", {
+      name: i18n.t("detailDisplay_full"),
+    }),
   );
   await waitFor(() =>
     expect(
-      screen.getByRole<HTMLSelectElement>("combobox", {
+      screen.getByRole<HTMLButtonElement>("button", {
         name: i18n.t("bashOperations"),
-      }).value,
-    ).toBe("full"),
+      }).textContent,
+    ).toBe(i18n.t("detailDisplay_full")),
   );
   expect(concurrency.value).toBe("9");
   fireEvent.submit(concurrency.closest("form")!);

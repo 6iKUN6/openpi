@@ -18,6 +18,7 @@ import { Providers } from "../../web/ui/src/app/providers.tsx";
 import { ActivityBar } from "../../web/ui/src/features/activity/ActivityBar.tsx";
 import { recordedSubagents } from "../../web/ui/src/features/subagents/recorded-subagents.ts";
 import { SubagentPanel } from "../../web/ui/src/features/subagents/SubagentPanel.tsx";
+import { SessionOverview } from "../../web/ui/src/features/subagents/SessionOverview.tsx";
 import { subagentOverview } from "../../web/ui/src/features/subagents/subagent-overview.ts";
 import { Transcript } from "../../web/ui/src/features/transcript/Transcript.tsx";
 import { i18n } from "../../web/ui/src/i18n.ts";
@@ -77,6 +78,99 @@ it("downgrades stale running projections in the overview without discarding conf
   );
   expect(items.find((item) => item.id === "running")?.state).toBeUndefined();
   expect(items.find((item) => item.id === "done")?.state).toBe("done");
+});
+
+it("reports omitted Workflow runs separately in the conversation overview", () => {
+  render(
+    createElement(
+      Providers,
+      null,
+      createElement(SessionOverview, {
+        sessionId: "parent",
+        workspace: "Fixture",
+        agents: [],
+        omitted: 0,
+        omittedWorkflows: 1,
+        review: null,
+        onSubagents: vi.fn(),
+        onReview: vi.fn(),
+      }),
+    ),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: i18n.t("sessionOverview") }),
+  );
+  expect(
+    screen.getByText(i18n.t("subagentWorkflowsTruncated", { count: 1 })),
+  ).toBeTruthy();
+  expect(
+    screen.queryByText(i18n.t("subagentListTruncated", { count: 1 })),
+  ).toBeNull();
+});
+
+it("shows assigned tasks and elapsed time while completed rows remain compact", async () => {
+  vi.useFakeTimers();
+  const now = new Date("2026-10-22T07:00:00Z").getTime();
+  vi.setSystemTime(now);
+  const read = vi.spyOn(WebClient.prototype, "subagentDetail");
+  const { container } = render(
+    createElement(
+      Providers,
+      null,
+      createElement(SubagentPanel, {
+        sessionId: "parent",
+        activity: {
+          items: [
+            {
+              id: "assigned",
+              title: "Master chain audit",
+              status: "running",
+              createdAt: now - 7_000,
+              taskPreview:
+                "Check the task master against the assigned acceptance criteria.",
+            },
+            {
+              id: "starting",
+              title: "Input review",
+              status: "running",
+              createdAt: now - 382_000,
+            },
+            {
+              id: "finished",
+              title: "React185 review",
+              status: "done",
+              createdAt: now - 900_000,
+              settledAt: now - 840_000,
+            },
+          ],
+          omitted: 0,
+          truncated: false,
+        },
+        onClose: vi.fn(),
+      }),
+    ),
+  );
+  const assigned = screen.getByRole("button", { name: /Master chain audit/ });
+  expect(
+    assigned.querySelector(".subagent-task-description")?.textContent,
+  ).toBe("Check the task master against the assigned acceptance criteria.");
+  expect(assigned.querySelector(".subagent-task-end")?.textContent).toBe("7s");
+  expect(
+    screen.getByRole("button", { name: /Input review/ }).textContent,
+  ).toContain(i18n.t("subagentProcessing"));
+  const finished = screen.getByRole("button", { name: /React185 review/ });
+  expect(finished.querySelector(".subagent-task-description")).toBeNull();
+  expect(finished.querySelector("time")?.dateTime).toBe(
+    new Date(now - 840_000).toISOString(),
+  );
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1_000);
+  });
+  expect(assigned.querySelector(".subagent-task-end")?.textContent).toBe("8s");
+  expect(
+    container.querySelector(".subagent-task-row .subagent-running-icon"),
+  ).toBeNull();
+  expect(read).not.toHaveBeenCalled();
 });
 
 it("shows active tasks progressively without mixing omitted workflow counts with child counts", () => {
@@ -232,7 +326,7 @@ async function flush() {
 it("opens a nonmodal grouped overview, then supports detail/back and Escape navigation", async () => {
   const read = vi
     .spyOn(WebClient.prototype, "subagentDetail")
-    .mockResolvedValue(reply());
+    .mockResolvedValue(reply(detail({ model: "local-codex/gpt-6.1-sol" })));
   const onClose = vi.fn();
   render(
     createElement(
@@ -271,6 +365,9 @@ it("opens a nonmodal grouped overview, then supports detail/back and Escape navi
   fireEvent.click(screen.getByRole("button", { name: /Package review/ }));
   await flush();
   expect(read).toHaveBeenCalledTimes(1);
+  expect(panel.querySelector(".subagent-panel-heading")?.textContent).toContain(
+    "gpt-6.1-sol",
+  );
   expect(
     screen.queryByRole("navigation", { name: i18n.t("subagentTasks") }),
   ).toBeNull();
@@ -282,6 +379,14 @@ it("opens a nonmodal grouped overview, then supports detail/back and Escape navi
     screen.getByRole("navigation", { name: i18n.t("subagentTasks") }),
   ).toBeTruthy();
   expect(onClose).not.toHaveBeenCalled();
+  read.mockResolvedValue(reply(detail({ id: "sa-2", title: "Readme review" })));
+  fireEvent.click(screen.getByRole("button", { name: /Readme review/ }));
+  expect(
+    panel.querySelector(".subagent-panel-heading")?.textContent,
+  ).not.toContain("gpt-6.1-sol");
+  await flush();
+  expect(panel.querySelector(".subagent-panel-model")).toBeNull();
+  fireEvent.keyDown(panel, { key: "Escape" });
   fireEvent.keyDown(panel, { key: "Escape" });
   expect(onClose).toHaveBeenCalledTimes(1);
 });
@@ -465,7 +570,7 @@ it("renders real transcript, paired tool errors and redacted thinking without ex
                 type: "toolCall",
                 toolId: "call-1",
                 name: "read",
-                argsPreview: "missing.txt",
+                argsPreview: JSON.stringify({ path: "missing.txt" }),
               },
             ],
           },
@@ -493,12 +598,20 @@ it("renders real transcript, paired tool errors and redacted thinking without ex
   const log = screen.getByRole("log");
   expect(within(log).getByText("Child task")).toBeTruthy();
   expect(within(log).getByText("Read attempt")).toBeTruthy();
+  expect(
+    log.querySelector('.tool-evidence-card[data-tool="read"] summary')
+      ?.textContent,
+  ).toContain("missing.txt");
+  // A stopped child cannot leave its last pending tool looking as if it is still running.
+  expect(
+    log.querySelector('[data-running="true"], [data-state="running"]'),
+  ).toBeNull();
   expect(within(log).queryByText("Hidden sensitive thought")).toBeNull();
   expect(
     within(log).getByText(i18n.t("subagentThinkingRedacted")),
   ).toBeTruthy();
   expect(within(log).getAllByText("File unavailable")).toHaveLength(1);
-  expect(within(log).getByText(i18n.t("subagentTool_error"))).toBeTruthy();
+  expect(within(log).getByText(i18n.t("toolState_failed"))).toBeTruthy();
   expect(within(log).getByText("Searching")).toBeTruthy();
   expect(screen.getByRole("alert").textContent).toBe("Stopped by parent");
   expect(screen.getByText(i18n.t("subagentState_interrupted"))).toBeTruthy();
@@ -569,6 +682,142 @@ function snapshot(): WebSnapshot {
     },
   };
 }
+
+it("resolves the same child for pending and returned follow-ups without keeping the call running", () => {
+  const value = snapshot();
+  const call = {
+    type: "toolCall" as const,
+    id: "send-call",
+    name: "subagent_send",
+    arguments: JSON.stringify({ id: "sa-1", message: "Check the workspace" }),
+  };
+  value.selectedSession!.entries.push({
+    type: "message",
+    id: "send",
+    timestamp: "",
+    message: { role: "assistant", content: "", parts: [call] },
+  });
+  value.runtime.liveTools = [{ call, state: "running" }];
+  const onInspectSubagent = vi.fn();
+  const view = (current: WebSnapshot) =>
+    createElement(
+      Providers,
+      null,
+      createElement(Transcript, {
+        snapshot: current,
+        liveMessages: [],
+        liveRunning: true,
+        livePhase: "running",
+        liveRetry: null,
+        thinkingStarts: {},
+        thinkingDurations: {},
+        scrollToBottom: 0,
+        onInspectSubagent,
+      }),
+    );
+  const { container, rerender } = render(view(value));
+  expect(
+    container.querySelector(
+      ".process-sequence.running > summary .process-sequence-preview",
+    )?.textContent,
+  ).toBe("Package review");
+  expect(
+    container.querySelector(".subagent-card-open .subagent-activity-title")
+      ?.textContent,
+  ).toBe("Package review");
+  const operation = container.querySelector(".subagent-operation")!;
+  fireEvent.click(within(operation as HTMLElement).getByRole("button"));
+  expect(onInspectSubagent).toHaveBeenLastCalledWith("sa-1");
+  rerender(
+    view({
+      ...value,
+      runtime: { ...value.runtime, liveTools: [] },
+      selectedSession: {
+        ...value.selectedSession!,
+        entries: [
+          ...value.selectedSession!.entries,
+          {
+            type: "message",
+            id: "sent",
+            timestamp: "",
+            message: {
+              role: "toolResult",
+              toolCallId: call.id,
+              toolName: call.name,
+              content: "Steered sa-1. It is queued into the active run.",
+              isError: false,
+              details: { id: "sa-1", status: "running" },
+            },
+          },
+        ],
+      },
+    }),
+  );
+  expect(container.querySelector(".process-sequence.running")).toBeNull();
+  const returned = container.querySelector(".subagent-operation")!;
+  expect(returned.textContent).toContain(i18n.t("subagentActionDone_send"));
+  expect(returned.querySelector(".subagent-running-icon")).toBeNull();
+  expect(
+    container.querySelector(".subagent-card-open .subagent-running-icon"),
+  ).not.toBeNull();
+  fireEvent.click(within(returned as HTMLElement).getByRole("button"));
+  expect(onInspectSubagent).toHaveBeenLastCalledWith("sa-1");
+});
+
+it("opens exact persisted child history without requiring a live parent manager", async () => {
+  const read = vi
+    .spyOn(WebClient.prototype, "subagentDetail")
+    .mockResolvedValue(
+      reply(
+        detail({
+          status: "done",
+          outcome: "completed",
+          finalText: "Recovered review",
+          transcript: [
+            {
+              kind: "assistant",
+              parts: [{ type: "text", text: "Recovered review" }],
+            },
+          ],
+        }),
+      ),
+    );
+  render(
+    createElement(
+      Providers,
+      null,
+      createElement(SubagentPanel, {
+        sessionId: "session-a",
+        sessionPath: "/saved/parent.jsonl",
+        initialId: "sa-1",
+        activity: {
+          items: [
+            {
+              id: "sa-1",
+              title: "Persisted review",
+              status: "done",
+              outcome: "completed",
+              createdAt: 1,
+            },
+          ],
+          omitted: 0,
+          truncated: false,
+        },
+        liveAvailable: true,
+        onClose: vi.fn(),
+      }),
+    ),
+  );
+  await flush();
+  expect(read).toHaveBeenCalledWith(
+    "session-a",
+    "sa-1",
+    expect.any(AbortSignal),
+    "/saved/parent.jsonl",
+  );
+  expect(screen.getAllByText("Recovered review").length).toBeGreaterThan(0);
+  expect(document.querySelector(".subagent-running-icon")).toBeNull();
+});
 
 it("opens only the selected saved child record without fetching a historical Session", async () => {
   const read = vi.spyOn(WebClient.prototype, "subagentDetail");
@@ -1066,4 +1315,24 @@ it("keeps the overview entry reachable for saved children after the live manager
     }),
   );
   expect(inspect).toHaveBeenCalledWith();
+});
+
+it("shows the child's cumulative spend in the detail metadata", async () => {
+  vi.spyOn(WebClient.prototype, "subagentDetail").mockResolvedValue(
+    reply(
+      detail({
+        model: "provider/model",
+        spend: {
+          input: 1_000,
+          output: 250,
+          cacheRead: 600,
+          cacheWrite: 40,
+        },
+      }),
+    ),
+  );
+  showPanel();
+  await flush();
+  const spend = screen.getByTitle(i18n.t("subagentSpend"));
+  expect(spend.textContent).toBe("1.6k in (600 cached) · 250 out");
 });

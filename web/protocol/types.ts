@@ -1,4 +1,5 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { isForkSnapshotToolBoundary, readForkSnapshotBoundary, WEB_SESSION_FORK_SNAPSHOT, type WebSessionForkWorktree } from "./session-fork.ts";
 import type { WebAppearancePreference } from "../../extensions/shared/setup-config.ts";
 export type { WebAppearancePreference } from "../../extensions/shared/setup-config.ts";
 import { readTurnTiming, WEB_TURN_TIMING_ENTRY } from "./turn-timing.ts";
@@ -42,8 +43,8 @@ export const WEB_PROMPT_IMAGE_MAX_BASE64_CHARS = 4 * Math.ceil(WEB_PROMPT_IMAGE_
 export const WEB_PROMPT_IMAGE_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 
 export type WebPromptDelivery =
-  | { streamingBehavior: "followUp"; expectedTurnCommandId?: never }
-  | { streamingBehavior: "steer"; expectedTurnCommandId: string };
+  | { streamingBehavior: "followUp"; expectedTurnCommandId?: never; retryEntryId?: string }
+  | { streamingBehavior: "steer"; expectedTurnCommandId: string; retryEntryId?: never };
 export const WEB_MAX_GIT_REVIEW_FILES = 200;
 export const WEB_MAX_GIT_REVIEW_DIFF_BYTES = 3 * 1024 * 1024;
 export const WEB_MAX_SELECTED_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
@@ -59,11 +60,27 @@ export interface WebEvent {
   detail?: Record<string, unknown>;
 }
 
+export type WebSidebarPinTarget =
+  | { kind: "workspace"; path: string }
+  | { kind: "session"; path: string; id: string };
+
 export interface WebSessionSummary {
   pinOrder?: number;
+  order?: number;
+  /** Operator reading state; independent of execution success or input ownership. */
+  unread?: boolean;
+  /** Opaque equality token for the observed result and concurrent reading edits. */
+  readRevision?: string;
+  /** Earliest unacknowledged native result, or an explicit whole-Session mark. */
+  firstUnread?:
+    | { type: "sessionStart" }
+    | { type: "turn"; commandId: string; finishedAt: number; outcome: "completed" | "failed"; resultEntryId?: string };
   id: string;
   path: string;
   cwd: string;
+  /** Sidebar project ancestry; execution and file access always use cwd. */
+  workspacePath?: string;
+  worktree?: WebSessionForkWorktree;
   /** Classification of this Web directory projection, not original creation history. */
   source: "web-session";
   origin: "web";
@@ -90,6 +107,7 @@ export interface WebSessionSummary {
 }
 
 export interface WebWorkspaceSummary {
+  pinOrder?: number;
   path: string;
   name: string;
   current: boolean;
@@ -214,9 +232,6 @@ export interface WebSettingsResourceCatalog {
 export interface WebOpenPiSetupProjection {
   webSearch?: { enabled: boolean };
   response?: MyPiSetupConfig["response"];
-  capabilities: {
-    discovery: "explicit" | "adaptive";
-  };
   suggestions: {
     enabled: boolean;
     model?: {
@@ -237,8 +252,12 @@ export interface WebOpenPiSetupProjection {
     webAuxiliaryWidth?: number;
     webChatFontSize: number;
     webExpandThinking: boolean;
+    webFollowUpBehavior?: "followUp" | "steer";
     webHiddenThinkingLevels?: readonly ReasoningLevel[];
     webPinnedSort?: "manual" | "updated";
+    webSidebarGrouping?: "project" | "list";
+    webChatsSort?: "manual" | "updated";
+    webProjectsInRecents?: boolean;
     showHeader: boolean;
     customFooter: boolean;
     footerStyle: string;
@@ -280,19 +299,24 @@ export interface WebArchivedSessionQuery {
 
 export interface WebSettingsPreferencesPatch {
   hiddenThinkingLevels?: readonly ReasoningLevel[];
+  thinkingLevelVisibility?: { level: ReasoningLevel; visible: boolean };
   subagentResultDisplay?: "full" | "compact";
   bashToolDisplay?: "full" | "compact";
   fileMutationDisplay?: "full" | "compact";
   customFooter?: boolean;
   footerStyle?: "plain" | "powerline" | "powerline-mono";
   pinnedSort?: "manual" | "updated";
+  sidebarGrouping?: "project" | "list";
+  chatsSort?: "manual" | "updated";
+  projectsInRecents?: boolean;
   theme?: WebThemePreference;
-  appearance?: WebAppearancePreference;
+  appearance?: Partial<WebAppearancePreference>;
   chatWidth?: number;
   sidebarWidth?: number;
   auxiliaryWidth?: number;
   chatFontSize?: number;
   expandThinking?: boolean;
+  followUpBehavior?: "followUp" | "steer";
 }
 
 export interface WebProjectionTruncation {
@@ -310,6 +334,8 @@ export interface WebSessionProjection {
   entries: ReturnType<typeof projectEntry>[];
   bytes: number;
   truncation: WebProjectionTruncation;
+  /** Exact selected Session's live and persisted child history, independent of transcript pagination. */
+  capabilities?: WebCapabilitySnapshot;
   rerun?: { source: WebHistoryAnchor; mode: "edit" | "regenerate" };
   history?: {
     leafEntryId: string | null;
@@ -384,6 +410,12 @@ export interface WebMessageTruncation {
 }
 
 export interface WebLiveMessage {
+  /** Provider-reported accounting for this response, never Session totals. */
+  usage?: Partial<Pick<WebSessionUsage, "input" | "output" | "cacheRead" | "cacheWrite">>;
+  provider?: string;
+  model?: string;
+  /** Pi's bounded native child ledger. Child result bodies are not persisted by Pi. */
+  nestedCalls?: { calls: WebNestedToolCall[]; complete: boolean };
   webSearch?: (NativeSearchActivity & { beforePartIndex?: number })[];
   timestamp?: number;
   commandId?: string;
@@ -394,6 +426,8 @@ export interface WebLiveMessage {
   parts?: WebMessagePart[];
   toolCallId?: string;
   isError?: boolean;
+  /** Validated native snapshot boundary; isError remains model transport, not a failure receipt. */
+  forkSnapshotToolResult?: true;
   stopReason?: "stop" | "length" | "toolUse" | "aborted" | "error";
   /** Bounded, redacted provider failure text; not a substitute for the terminal reason. */
   errorMessage?: string;
@@ -401,6 +435,14 @@ export interface WebLiveMessage {
   display?: boolean;
   details?: unknown;
   truncation?: WebMessageTruncation;
+}
+
+export interface WebNestedToolCall {
+  call: Extract<WebMessagePart, { type: "toolCall" }>;
+  status: "ok" | "error" | "unfinished";
+  argumentsOmitted?: true;
+  error?: string;
+  durationMs?: number;
 }
 
 export interface WebPromptImage {
@@ -534,11 +576,15 @@ export interface WebSnapshot {
     auxiliaryWidth?: number;
     chatFontSize?: number;
     expandThinking?: boolean;
+    followUpBehavior?: "followUp" | "steer";
     hiddenThinkingLevels?: readonly ReasoningLevel[];
     subagentResultDisplay?: "full" | "compact";
     bashToolDisplay?: "full" | "compact";
     fileMutationDisplay?: "full" | "compact";
     pinnedSort?: "manual" | "updated";
+    sidebarGrouping?: "project" | "list";
+    chatsSort?: "manual" | "updated";
+    projectsInRecents?: boolean;
   };
   /** Absent until the browser selects or creates a real Web Session. */
   currentSessionId?: string;
@@ -713,6 +759,33 @@ function detailsProjection(value: unknown) {
   };
 }
 
+/** Keep exact display facts when a completion's detailed evidence exceeds the budget. */
+function subagentDisplayDetails(value: unknown) {
+  const own = (object: unknown, key: string): unknown => object && typeof object === "object"
+    ? Object.getOwnPropertyDescriptor(object, key)?.value : undefined;
+  const results = own(value, "results");
+  const batch = Array.isArray(results);
+  const rows: Record<string, unknown>[] = [];
+  let bytes = 32;
+  const length = batch ? Math.min(results.length, WEB_MAX_STRUCTURED_ARRAY_ITEMS) : 1;
+  for (let index = 0; index < length; index++) {
+    const source = batch ? own(results, String(index)) : value;
+    const id = own(source, "id");
+    if (typeof id !== "string" || !id || id.length > 160 || /[\u0000-\u001f\u007f]/u.test(id)) continue;
+    const row: Record<string, unknown> = { id };
+    const title = own(source, "title");
+    if (typeof title === "string") row.title = boundedText(title, WEB_MAX_METADATA_TEXT);
+    const status = own(source, "status");
+    if (status === "done" || status === "error" || status === "running") row.status = status;
+    const outcome = own(source, "outcome");
+    if (outcome === "completed" || outcome === "interrupted" || outcome === "uncertain") row.outcome = outcome;
+    bytes += jsonByteLength(row) + 1;
+    if (bytes > WEB_MAX_DETAILS_BYTES) break;
+    rows.push(row);
+  }
+  return batch ? { results: rows } : rows[0];
+}
+
 /** Keep structured tool details only when they serialize small and clean. */
 export function boundedDetails(value: unknown): unknown {
   return detailsProjection(value).value;
@@ -819,10 +892,10 @@ function projectContent(message: Record<string, unknown>, resolvePath?: (path: s
         typeof typed.name === "string" ? typed.name : "tool",
         WEB_MAX_METADATA_TEXT,
       );
-      const evidenceArguments = isEvidenceTool(name.value) ? projectEvidenceArguments(typed.arguments) : undefined;
+      let evidenceArguments = isEvidenceTool(name.value) ? projectEvidenceArguments(typed.arguments) : undefined;
       if (evidenceArguments && typeof evidenceArguments.path === "string" && !evidenceArguments.path.startsWith("~") && !evidenceArguments.path.startsWith("@")) {
         const path = resolvePath?.(evidenceArguments.path);
-        if (path && path.length <= 4096) evidenceArguments.resolvedPath = path;
+        if (path) evidenceArguments = projectEvidenceArguments({ ...evidenceArguments, resolvedPath: path }, true);
       }
       projected = {
         type: "toolCall",
@@ -886,14 +959,60 @@ function projectNativeSearch(message: unknown, partCount: number) {
   }));
 }
 
+function projectNestedCalls(input: unknown, resolvePath?: (path: string) => string | undefined) {
+  if (!input || typeof input !== "object") return undefined;
+  const raw = input as Record<string, unknown>;
+  if (!Array.isArray(raw.calls) || typeof raw.complete !== "boolean") return undefined;
+  const calls: WebNestedToolCall[] = [];
+  const ids = new Set<string>();
+  let complete = raw.complete && raw.calls.length <= 256;
+  let bytes = 0;
+  for (const item of raw.calls.slice(0, 256)) {
+    if (!item || typeof item !== "object") { complete = false; continue; }
+    const value = item as Record<string, unknown>;
+    if (typeof value.id !== "string" || !value.id || value.id.length > 500 || ids.has(value.id) ||
+      typeof value.name !== "string" || !value.name || value.name.length > 500 ||
+      !["ok", "error", "unfinished"].includes(String(value.status))) { complete = false; continue; }
+    ids.add(value.id);
+    const call = projectContent({ content: [{ type: "toolCall", id: value.id, name: value.name, arguments: value.arguments ?? {} }] }, resolvePath).parts[0];
+    if (call?.type !== "toolCall") { complete = false; continue; }
+    const argumentsOmitted = value.arguments === undefined || call.evidenceTruncated === true;
+    complete &&= !argumentsOmitted && value.status !== "unfinished";
+    const projected: WebNestedToolCall = {
+      call, status: value.status as WebNestedToolCall["status"],
+      ...(argumentsOmitted ? { argumentsOmitted: true } : {}),
+      ...(typeof value.error === "string" ? { error: value.error.slice(0, 500) } : {}),
+      ...(typeof value.durationMs === "number" && Number.isFinite(value.durationMs) && value.durationMs >= 0 ? { durationMs: value.durationMs } : {}),
+    };
+    bytes += jsonByteLength(projected);
+    if (bytes > 64 * 1024) { complete = false; break; }
+    calls.push(projected);
+  }
+  return { calls, complete };
+}
+
 export function projectMessage(message: unknown, resolvePath?: (path: string) => string | undefined): WebLiveMessage {
   const value =
     message && typeof message === "object"
       ? (message as Record<string, unknown>)
       : {};
   const content = projectContent(value, resolvePath);
+  const rawUsage = value.role === "assistant" && value.usage && typeof value.usage === "object"
+    ? value.usage as Record<string, unknown> : undefined;
+  const usage = rawUsage ? Object.fromEntries(
+    ["input", "output", "cacheRead", "cacheWrite"].flatMap((key) => {
+      const count = rawUsage[key];
+      return typeof count === "number" && Number.isFinite(count) && count >= 0 ? [[key, count]] : [];
+    }),
+  ) : undefined;
+  const placeholderUsage = (value.stopReason === "error" || value.stopReason === "aborted") &&
+    usage && !Object.values(usage).some((count) => count > 0);
   const webSearch = projectNativeSearch(value, content.parts.length);
   const details = detailsProjection(value.details);
+  if (details.truncated && value.role === "custom" && value.customType === "subagent-result") {
+    details.value = subagentDisplayDetails(value.details);
+  }
+  const nestedCalls = value.role === "toolResult" ? projectNestedCalls(value.nestedCalls, resolvePath) : undefined;
   const role =
     typeof value.role === "string"
       ? boundedTextProjection(value.role, WEB_MAX_METADATA_TEXT)
@@ -916,6 +1035,7 @@ export function projectMessage(message: unknown, resolvePath?: (path: string) =>
   const errorMessage = stopReason === "error" && typeof value.errorMessage === "string"
     ? projectAssistantError(value.errorMessage)
     : undefined;
+  const forkSnapshotToolResult = isForkSnapshotToolBoundary(value);
   const metadataTruncated =
     role?.truncated === true ||
     toolName?.truncated === true ||
@@ -928,14 +1048,19 @@ export function projectMessage(message: unknown, resolvePath?: (path: string) =>
     metadataTruncated || errorMessage?.truncated === true;
   return {
     role: role?.value,
+    ...(usage && !placeholderUsage && Object.keys(usage).length ? { usage } : {}),
+    ...(value.role === "assistant" && typeof value.provider === "string" ? { provider: value.provider.slice(0, WEB_MAX_METADATA_TEXT) } : {}),
+    ...(value.role === "assistant" && typeof value.model === "string" ? { model: value.model.slice(0, WEB_MAX_METADATA_TEXT) } : {}),
+    ...(nestedCalls ? { nestedCalls } : {}),
     ...(webSearch ? { webSearch } : {}),
     ...(typeof value.timestamp === "number" && Number.isFinite(value.timestamp) ? { timestamp: value.timestamp } : {}),
-    ...(value.toolName === "bash" && value.isError === true ? { terminalReceipt: bashReceipt(value.content, value.isError) } : {}),
+    ...(value.toolName === "bash" && value.isError === true && !forkSnapshotToolResult ? { terminalReceipt: bashReceipt(value.content, value.isError) } : {}),
     toolName: toolName?.value,
     content: content.content,
     ...(content.parts.length > 0 ? { parts: content.parts } : {}),
     ...(toolCallId ? { toolCallId: toolCallId.value } : {}),
     ...(typeof value.isError === "boolean" ? { isError: value.isError } : {}),
+    ...(forkSnapshotToolResult ? { forkSnapshotToolResult: true } : {}),
     ...(stopReason ? { stopReason } : {}),
     ...(errorMessage ? { errorMessage: errorMessage.value } : {}),
     ...(customType ? { customType: customType.value } : {}),
@@ -969,6 +1094,7 @@ export function projectEntry(entry: SessionEntry, resolvePath?: (path: string) =
   message?: WebLiveMessage;
   turnTiming?: ReturnType<typeof readTurnTiming>;
   turnChanges?: WebTurnChanges;
+  forkSnapshotBoundary?: NonNullable<ReturnType<typeof readForkSnapshotBoundary>>;
 } {
   const metadata = { id: entry.id, timestamp: entry.timestamp, ...(entry.parentId === undefined ? {} : { parentId: entry.parentId }) };
   if (entry.type === "custom" && entry.customType === WEB_TURN_TIMING_ENTRY) {
@@ -1021,6 +1147,10 @@ export function projectEntry(entry: SessionEntry, resolvePath?: (path: string) =
     }
   }
   if (entry.type === "custom_message") {
+    if (entry.customType === WEB_SESSION_FORK_SNAPSHOT) {
+      const forkSnapshotBoundary = readForkSnapshotBoundary(entry);
+      return { type: entry.type, ...metadata, ...(forkSnapshotBoundary ? { forkSnapshotBoundary } : {}) };
+    }
     return {
       type: "message" as const,
       ...metadata,

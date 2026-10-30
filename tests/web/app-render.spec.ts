@@ -30,8 +30,8 @@ import {
   type SessionReadingCache,
   sessionReadingScope,
 } from "../../web/ui/src/features/transcript/session-reading-state.ts";
-import { Transcript } from "../../web/ui/src/features/transcript/Transcript.tsx";
 import { ToolEvidence } from "../../web/ui/src/features/transcript/ToolEvidence.tsx";
+import { Transcript } from "../../web/ui/src/features/transcript/Transcript.tsx";
 import { i18n } from "../../web/ui/src/i18n.ts";
 import { WebClient } from "../../web/ui/src/protocol/client.ts";
 import type { EventStreamOptions } from "../../web/ui/src/protocol/event-stream.ts";
@@ -461,7 +461,6 @@ it.each([
           "/api/settings/catalog": {
             sessionId: "session",
             setup: {
-              capabilities: { discovery: "explicit" },
               suggestions: { enabled: false },
               workflows: { concurrency: 6, maxAgentCalls: 64 },
               ui: {
@@ -548,12 +547,18 @@ it.each([
             name: i18n.t("openModelSettings"),
           }),
         );
-      } else
+      } else {
+        expect(
+          screen.queryByRole("button", {
+            name: i18n.t("archivedConversations"),
+          }),
+        ).toBeNull();
         await act(async () =>
           fireEvent.click(
             screen.getByRole("button", { name: i18n.t(trigger) }),
           ),
         );
+      }
       const dialog = await screen.findByRole("dialog", {
         name: i18n.t("settings"),
       });
@@ -771,7 +776,7 @@ describe("OpenPI React transcript", () => {
     );
 
     expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe("foo ");
-    expect(screen.getByText("foo bar")).toBeTruthy();
+    expect(screen.getAllByText("foo bar")).toHaveLength(2);
   });
 
   it("keeps the 16-cell logo animation replayable", () => {
@@ -902,16 +907,12 @@ describe("OpenPI React transcript", () => {
     expect(
       process?.querySelector("summary")?.getAttribute("aria-label"),
     ).not.toContain(i18n.t("processActivityCount", { count: 1 }));
-    const counts = process?.querySelector(".process-sequence-counts");
-    expect(counts?.textContent).toContain(
-      i18n.t("processThinkingCount", { count: 1 }),
-    );
-    expect(counts?.textContent).toContain(
-      i18n.t("processToolCount", { count: 4 }),
-    );
-    expect(counts?.textContent).not.toContain(
-      i18n.t("processActivityCount", { count: 1 }),
-    );
+    const counts = process
+      ?.querySelector("summary")
+      ?.getAttribute("aria-label");
+    expect(counts).toContain(i18n.t("processThinkingCount", { count: 1 }));
+    expect(counts).toContain(i18n.t("processToolCount", { count: 4 }));
+    expect(counts).not.toContain(i18n.t("processActivityCount", { count: 1 }));
     expect(
       process?.querySelector(".process-step:first-child .thinking-line"),
     ).toBeTruthy();
@@ -921,7 +922,7 @@ describe("OpenPI React transcript", () => {
     expect(container.querySelectorAll(".tool-evidence-card")).toHaveLength(4);
     expect(
       container.querySelectorAll(".tool-evidence-card .tool-name"),
-    ).toHaveLength(4);
+    ).toHaveLength(0);
     expect(container.querySelectorAll(".activity-card.subagent")).toHaveLength(
       1,
     );
@@ -1136,7 +1137,7 @@ it("marks only live execution evidence for shimmer styling", () => {
   const sequence = view.container.querySelector<HTMLDetailsElement>(
     ".process-sequence:not(.single-process)",
   );
-  expect(sequence?.open).toBe(true);
+  expect(sequence?.open).toBe(false);
   expect(sequence?.dataset.status).toBe("running");
   const process = view.container.querySelector<HTMLElement>(
     ".process-step.running",
@@ -1282,7 +1283,7 @@ it("freezes unobserved activity without changing terminal receipts and resumes o
     "error",
     "error",
     "error",
-    "running",
+    "done",
     "running",
     "running",
     "running",
@@ -1293,7 +1294,6 @@ it("freezes unobserved activity without changing terminal receipts and resumes o
     "failed",
     "cancelled",
     "timed_out",
-    "running",
     "running",
   ]);
 
@@ -1303,7 +1303,7 @@ it("freezes unobserved activity without changing terminal receipts and resumes o
     "error",
     "error",
     "error",
-    "unknown",
+    "done",
     "unknown",
     "unknown",
     "unknown",
@@ -1314,7 +1314,6 @@ it("freezes unobserved activity without changing terminal receipts and resumes o
     "failed",
     "cancelled",
     "timed_out",
-    "unknown",
     "unknown",
   ]);
   expect(view.container.querySelector(".thinking-line.unknown")).toBeTruthy();
@@ -1326,7 +1325,7 @@ it("freezes unobserved activity without changing terminal receipts and resumes o
 
   view.rerender(createElement(I18nextProvider, { i18n }, node(true)));
   expect(statuses().slice(4)).toEqual([
-    "running",
+    "done",
     "running",
     "running",
     "running",
@@ -1338,7 +1337,6 @@ it("freezes unobserved activity without changing terminal receipts and resumes o
     "failed",
     "cancelled",
     "timed_out",
-    "running",
     "running",
   ]);
   expect(JSON.stringify(snapshot)).toBe(original);
@@ -1398,7 +1396,7 @@ it("freezes untimed turn and navigation presentation when native activity observ
   const sequence = view.container.querySelector<HTMLDetailsElement>(
     ".process-sequence:not(.single-process)",
   )!;
-  expect(sequence.open).toBe(true);
+  expect(sequence.open).toBe(false);
   view.rerender(createElement(I18nextProvider, { i18n }, node(false)));
   expect(
     view.container.querySelector(".turn-state.unknown")?.textContent,
@@ -1414,7 +1412,7 @@ it("freezes untimed turn and navigation presentation when native activity observ
   expect(
     view.container.querySelector(".process-sequence:not(.single-process)"),
   ).toBe(sequence);
-  expect(sequence.open).toBe(true);
+  expect(sequence.open).toBe(false);
   expect(JSON.stringify(snapshot)).toBe(original);
   view.rerender(createElement(I18nextProvider, { i18n }, node(true)));
   expect(view.container.querySelector(".turn-state.running")).toBeTruthy();
@@ -1425,23 +1423,24 @@ it("freezes untimed turn and navigation presentation when native activity observ
   expect(JSON.stringify(snapshot)).toBe(original);
 });
 
-it("keeps background evidence observed by default and freezes only its nonterminal presentation", () => {
+it("keeps live terminal evidence observed by default and freezes only its nonterminal presentation", () => {
   const call = {
     type: "toolCall" as const,
-    id: "background-status",
-    name: "bg_status",
-    arguments: '{"id":"background-process"}',
+    id: "bash-live",
+    name: "bash",
+    arguments: '{"command":"run-server"}',
   };
   const result = {
     role: "toolResult",
     toolName: call.name,
     toolCallId: call.id,
-    content: "Exact native background receipt",
+    content: "Exact native bash receipt",
     isError: false,
-    details: { status: "running" },
   };
   const original = JSON.stringify(result);
-  const view = renderWithI18n(createElement(ToolEvidence, { call, result }));
+  const view = renderWithI18n(
+    createElement(ToolEvidence, { call, result, liveState: "running" }),
+  );
   const state = () =>
     view.container
       .querySelector(".tool-evidence-card")
@@ -1451,24 +1450,29 @@ it("keeps background evidence observed by default and freezes only its nontermin
     createElement(
       I18nextProvider,
       { i18n },
-      createElement(ToolEvidence, { call, result, observed: false }),
+      createElement(ToolEvidence, {
+        call,
+        result,
+        liveState: "running",
+        observed: false,
+      }),
     ),
   );
   expect(state()).toBe("unknown");
   expect(JSON.stringify(result)).toBe(original);
-  for (const [status, expected] of [
-    ["done", "returned"],
-    ["failed", "failed"],
-    ["killed", "cancelled"],
-    ["timed_out", "timed_out"],
-  ]) {
+  for (const [receipt, expected] of [
+    [undefined, "returned"],
+    [{ state: "failed", exitCode: 2 }, "failed"],
+    [{ state: "cancelled" }, "cancelled"],
+    [{ state: "timed_out" }, "timed_out"],
+  ] as const) {
     view.rerender(
       createElement(
         I18nextProvider,
         { i18n },
         createElement(ToolEvidence, {
           call,
-          result: { ...result, details: { status, exitCode: 2 } },
+          result: { ...result, terminalReceipt: receipt },
           observed: false,
         }),
       ),
@@ -1479,7 +1483,7 @@ it("keeps background evidence observed by default and freezes only its nontermin
   expect(JSON.stringify(result)).toBe(original);
 });
 
-it("freezes orphan native running receipts after observation loss without changing terminal evidence", () => {
+it("keeps returned background queries settled through observation loss without changing terminal evidence", () => {
   const snapshot = activeSnapshot();
   const states = [
     "running",
@@ -1522,7 +1526,7 @@ it("freezes orphan native running receipts after observation loss without changi
       step.getAttribute("data-status"),
     );
   expect(statuses()).toEqual([
-    "running",
+    "done",
     "done",
     "error",
     "error",
@@ -1532,7 +1536,7 @@ it("freezes orphan native running receipts after observation loss without changi
   expect(view.container.querySelector(".tool-evidence-card")).toBeNull();
   view.rerender(createElement(I18nextProvider, { i18n }, node(false)));
   expect(statuses()).toEqual([
-    "unknown",
+    "done",
     "done",
     "error",
     "error",
@@ -1548,7 +1552,7 @@ it("freezes orphan native running receipts after observation loss without changi
   expect(JSON.stringify(snapshot)).toBe(original);
   view.rerender(createElement(I18nextProvider, { i18n }, node(true)));
   expect(statuses()).toEqual([
-    "running",
+    "done",
     "done",
     "error",
     "error",
@@ -1733,7 +1737,7 @@ it("shows an unobserved pending child as unknown while preserving a native faile
   ]);
 });
 
-it("freezes native running workflow cards while preserving their terminal and uncertain receipts", () => {
+it("keeps returned workflow queries settled while preserving their terminal and uncertain receipts", () => {
   const snapshot = activeSnapshot();
   const states = ["running", "completed", "failed", "aborted", "uncertain"];
   snapshot.selectedSession!.entries = [
@@ -1789,9 +1793,9 @@ it("freezes native running workflow cards while preserving their terminal and un
           card.querySelector(".status-mark")?.classList.contains(status),
         ) ?? "unknown",
     );
-  expect(statuses()).toEqual(["running", "done", "error", "error", "warn"]);
+  expect(statuses()).toEqual(["done", "done", "error", "error", "warn"]);
   view.rerender(createElement(I18nextProvider, { i18n }, node(false)));
-  expect(statuses()).toEqual(["unknown", "done", "error", "error", "warn"]);
+  expect(statuses()).toEqual(["done", "done", "error", "error", "warn"]);
   for (const status of states)
     expect(view.container.textContent).toContain(
       `Exact native workflow receipt: ${status}`,
@@ -2435,7 +2439,7 @@ it.each(["openpi-setup", "my-pi-setup"])(
         screen.getByRole("button", { name: i18n.t("retryPrompt") }),
       );
     });
-    expect(resend).toHaveBeenCalledWith(content);
+    expect(resend).toHaveBeenCalledWith(content, "answer");
   },
 );
 
@@ -2548,14 +2552,16 @@ it("renders side conversation messages with transcript role styling", async () =
 
   const user = await screen.findByText("Right aligned question");
   const assistant = await screen.findByText("Natural assistant answer");
+  expect(user.closest(".message-row.user")).toBeTruthy();
+  expect(assistant.closest(".message-row.assistant")).toBeTruthy();
   expect(
-    user.closest<HTMLElement>(".subagent-message.user")?.dataset.role,
-  ).toBe("user");
+    view.container.querySelector(".subagent-conversation .thinking-line.done"),
+  ).toBeTruthy();
   expect(
-    assistant.closest<HTMLElement>(".subagent-message.assistant")?.dataset.role,
-  ).toBe("assistant");
-  expect(view.container.querySelector(".subagent-thinking.done")).toBeTruthy();
-  expect(view.container.querySelector(".subagent-tool.running")).toBeTruthy();
+    view.container.querySelector(
+      '.subagent-conversation [data-tool="read"][data-state="unknown"]',
+    ),
+  ).toBeTruthy();
   expect(detail).toHaveBeenCalledWith(
     "session",
     "btw-1",
@@ -2614,7 +2620,7 @@ it("keeps background Session files, trajectory and activity scoped to the select
     epoch: 1,
   };
   snapshot.runtime.capabilities = {
-    "background-terminals": {
+    subagents: {
       items: [
         { id: "terminal-a", title: "A build", status: "running", createdAt: 1 },
       ],
@@ -2732,7 +2738,7 @@ it("keeps background Session files, trajectory and activity scoped to the select
     fireEvent.click(screen.getByRole("button", { name: i18n.t("chatView") }));
     fireEvent.click(screen.getByRole("button", { name: i18n.t("openTools") }));
     fireEvent.click(
-      screen.getByRole("button", {
+      screen.getByRole("menuitem", {
         name: new RegExp(i18n.t("files"), "u"),
       }),
     );
@@ -2747,6 +2753,20 @@ it("keeps background Session files, trajectory and activity scoped to the select
     );
     expect(files.textContent).toContain("b.txt");
     expect(files.textContent).not.toContain("a.txt");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt)
+        fireEvent.click(
+          screen.getByRole("button", { name: i18n.t("openTools") }),
+        );
+      fireEvent.click(
+        screen.getByRole("button", { name: i18n.t("workbarCollapseTools") }),
+      );
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByRole("button", { name: i18n.t("openTools") }),
+        ),
+      );
+    }
   } finally {
     view.unmount();
     start.mockRestore();
@@ -2820,7 +2840,7 @@ it("refreshes background Session Git review while a different Session runs", asy
   }
 });
 
-it("keeps the reader mounted across an external controller change and revokes input until refreshed", async () => {
+it("keeps the reader and editable draft across an external controller change without direct prompt admission", async () => {
   const original = webStore.getState();
   const snapshot = activeSnapshot();
   snapshot.runtime.status = "idle";
@@ -2948,7 +2968,7 @@ it("keeps the reader mounted across an external controller change and revokes in
     expect(
       view.container.querySelector<HTMLTextAreaElement>(".composer textarea")
         ?.disabled,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       await store.getState().actions.sendPrompt("Must not reach old A"),
     ).toBe(false);
@@ -3603,6 +3623,11 @@ it("shows Pi's queued messages above the composer after reload and in a backgrou
   expect(queued.querySelector("ol")).toBeNull();
   expect(queued.textContent).toContain("First follow-up");
   expect(queued.textContent).toContain(i18n.t("queuedImage"));
+  const summary = screen.getByRole("button", {
+    name: i18n.t("pendingFollowUpsHint", { count: 2 }),
+  });
+  expect(summary.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(summary);
   expect(
     screen.getByRole("button", {
       name: `${i18n.t("queuedMessageExpand")}: ${i18n.t("queuedImage")}`,
@@ -3648,17 +3673,25 @@ it("shows Pi's queued messages above the composer after reload and in a backgrou
   ).toBeNull();
 });
 
-it("keeps background terminal activity and omission receipts visible", () => {
+it("keeps capability activity and omission receipts visible", () => {
   const snapshot = activeSnapshot();
   snapshot.runtime.capabilities = {
-    "background-terminals": {
+    workflows: {
       items: [
         {
-          id: "terminal",
-          title: "Build",
+          runId: "wf-build",
+          name: "Build",
           status: "failed",
-          createdAt: 1,
-          settledAt: 2,
+          startedAt: 1,
+          finishedAt: 2,
+          agents: {
+            total: 3,
+            running: 0,
+            done: 0,
+            error: 1,
+            uncertain: 1,
+            omitted: 1,
+          },
         },
       ],
       omitted: 3,
@@ -3667,6 +3700,9 @@ it("keeps background terminal activity and omission receipts visible", () => {
   };
   render(createElement(ActivityBar, { snapshot }));
   expect(screen.getByText(/Build/)).toBeTruthy();
+  expect(screen.getByText(/Build/).textContent).toContain(
+    i18n.t("activityAgentProgress", { completed: 1, total: 3 }),
+  );
   expect(screen.getByText("+3")).toBeTruthy();
 });
 
@@ -3885,18 +3921,6 @@ it("keeps completed groups collapsed independently of the thinking preference", 
 it("does not attribute current runtime activity to a historical session", () => {
   const snapshot = activeSnapshot();
   snapshot.runtime.capabilities = {
-    "background-terminals": {
-      items: [
-        {
-          id: "terminal",
-          title: "Current build",
-          status: "running",
-          createdAt: 1,
-        },
-      ],
-      omitted: 0,
-      truncated: false,
-    },
     subagents: {
       items: [
         {
@@ -3939,7 +3963,7 @@ it("does not attribute current runtime activity to a historical session", () => 
     actions: store.getState().actions,
   };
   const { rerender } = renderWithI18n(createElement(Composer, props));
-  expect(screen.getByLabelText("Runtime activity")).toBeTruthy();
+  expect(screen.getByLabelText(i18n.t("runtimeActivities"))).toBeTruthy();
   rerender(
     createElement(
       I18nextProvider,
@@ -3950,7 +3974,7 @@ it("does not attribute current runtime activity to a historical session", () => 
       }),
     ),
   );
-  expect(screen.queryByLabelText("Runtime activity")).toBeNull();
+  expect(screen.queryByLabelText(i18n.t("runtimeActivities"))).toBeNull();
   expect(
     screen.queryByText(/Current build|Current agent|Current workflow/),
   ).toBeNull();
@@ -4018,90 +4042,6 @@ it("reports failed copy honestly, supports retry, and cleans up feedback on unmo
     vi.useRealTimers();
     vi.unstubAllGlobals();
   }
-});
-
-it("loads archived history even when its workspace summary was omitted", async () => {
-  const store = createWebStore();
-  const restore = vi
-    .spyOn(store.getState().actions, "unarchiveSession")
-    .mockResolvedValue(false);
-  const snapshot: WebSnapshot = {
-    protocolVersion: 1,
-    preferences: { theme: "system" },
-    generatedAt: "2026-09-01T10:00:00Z",
-    cursor: 1,
-    workspaces: [],
-    sessions: [
-      {
-        id: "archived",
-        path: "/omitted/a.jsonl",
-        cwd: "/omitted",
-        name: "Archived work",
-        archived: true,
-        modified: "2026-09-01T10:00:00Z",
-        created: "2026-09-01T10:00:00Z",
-        source: "web-session",
-        origin: "web",
-        controller: "none",
-        readOnly: false,
-        messageCount: 1,
-        firstMessage: "saved",
-      },
-    ],
-    models: [],
-    runtime: { status: "idle", capabilities: {} },
-    truncation: {
-      ...truncation,
-      sessionsOmitted: 20,
-      workspacesOmitted: 1,
-      truncated: true,
-    },
-  };
-  const read = vi
-    .spyOn(WebClient.prototype, "listArchivedSessions")
-    .mockResolvedValue({
-      sessions: snapshot.sessions,
-      truncation: {
-        truncated: false,
-        matchesOmitted: 0,
-        recordsUnscanned: 0,
-        maxPageSize: 100,
-        maxScanned: 2000,
-      },
-    });
-  renderWithI18n(
-    createElement(SessionSidebar, {
-      snapshot,
-      selectedPath: null,
-      selectedWorkspace: null,
-      collapsed: new Set<string>(),
-      query: "",
-      searchOpen: false,
-      mobileOpen: false,
-      settingsDisabled: false,
-      onOpenSettings: vi.fn(),
-      actions: store.getState().actions,
-    }),
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Archived" }));
-  expect(await screen.findByText("Archived work")).toBeTruthy();
-  expect(screen.getAllByText("/omitted").length).toBeGreaterThan(0);
-  expect(read).toHaveBeenCalledWith(
-    { query: "", limit: 25 },
-    expect.any(AbortSignal),
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Conversation options" }));
-  fireEvent.click(
-    await screen.findByRole("menuitem", { name: "Restore conversation" }),
-  );
-  expect(
-    await screen.findByText(
-      "Could not confirm restoration. Refresh and try again.",
-    ),
-  ).toBeTruthy();
-  expect(restore).toHaveBeenCalledWith("/omitted/a.jsonl");
-  expect(screen.getByText("Archived work")).toBeTruthy();
-  read.mockRestore();
 });
 
 it("shows complete model identities before workspace selection", () => {
@@ -4475,6 +4415,48 @@ describe("thinking level picker", () => {
     fireEvent.pointerUp(slider);
     expect(selectThinking).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("discards a slider preview when the model's supported levels change", () => {
+    const snapshot = idleThinkingSnapshot();
+    const props = thinkingProps(snapshot);
+    const selectThinking = vi.fn();
+    props.actions = { ...props.actions, selectThinking };
+    const view = renderWithI18n(createElement(Composer, props));
+    fireEvent.click(
+      screen.getByRole("button", { name: thinkingPickerName("medium") }),
+    );
+    const stale = screen.getByRole("slider", { name: i18n.t("thinkingLevel") });
+    fireEvent.change(stale, { target: { value: "4" } });
+    view.rerender(
+      createElement(
+        I18nextProvider,
+        { i18n },
+        createElement(Composer, {
+          ...props,
+          snapshot: {
+            ...snapshot,
+            thinking: {
+              revision: snapshot.thinking!.revision + 1,
+              supported: true,
+              level: "low",
+              available: ["low", "high", "max"],
+            },
+          },
+        }),
+      ),
+    );
+    fireEvent.pointerUp(stale);
+    expect(selectThinking).not.toHaveBeenCalled();
+    const current = screen.getByRole<HTMLInputElement>("slider", {
+      name: i18n.t("thinkingLevel"),
+    });
+    expect(current.max).toBe("2");
+    expect(current.value).toBe("0");
+    expect(current.getAttribute("aria-valuetext")).toBe("Low");
+    fireEvent.change(current, { target: { value: "2" } });
+    fireEvent.pointerUp(current);
+    expect(selectThinking).toHaveBeenCalledExactlyOnceWith("max");
   });
 
   it("keeps a pending picker interactive while the send button is disabled", () => {

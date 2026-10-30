@@ -308,7 +308,12 @@ function renderPowerlineLine(
   const leftText = renderPowerlineSide(left);
   const rightText = renderPowerlineSide(right);
   if (!rightText) return truncateToWidth(leftText, width);
-  if (!leftText) return truncateToWidth(rightText, width);
+  if (!leftText) {
+    const fittedRight = truncateToWidth(rightText, width);
+    return (
+      " ".repeat(Math.max(0, width - visibleWidth(fittedRight))) + fittedRight
+    );
+  }
 
   const gap = width - visibleWidth(leftText) - visibleWidth(rightText);
   if (gap >= 1) {
@@ -326,7 +331,12 @@ function renderPlainLine(
   const leftText = joinPlain(left, theme);
   const rightText = joinPlain(right, theme);
   if (!rightText) return truncateToWidth(leftText, width);
-  if (!leftText) return truncateToWidth(rightText, width);
+  if (!leftText) {
+    const fittedRight = truncateToWidth(rightText, width);
+    return (
+      " ".repeat(Math.max(0, width - visibleWidth(fittedRight))) + fittedRight
+    );
+  }
 
   const naturalGap = width - visibleWidth(leftText) - visibleWidth(rightText);
   if (naturalGap >= 1) {
@@ -444,6 +454,15 @@ export function renderFooterLine(
     style,
     theme,
   );
+  return renderFittedLine(fitted, style, width, theme);
+}
+
+function renderFittedLine(
+  fitted: { left: FooterSegment[]; right: FooterSegment[] },
+  style: FooterStyle,
+  width: number,
+  theme: Pick<Theme, "fg">,
+) {
   if (fitted.left.length === 0 && fitted.right.length === 0) return "";
 
   if (style === "plain") {
@@ -501,13 +520,13 @@ export function renderFooter(options: FooterRenderOptions) {
       ) +
         statusWidth <=
         options.width;
-    const line = renderFooterLine(
-      layout,
-      catalog,
+    // The status only inlines when the fitted segments also fit the reduced
+    // width, so neither branch needs to resolve and fit the layout again.
+    const line = renderFittedLine(
+      fitted,
       options.style,
       canInlineStatus ? options.width - statusWidth : options.width,
       options.theme,
-      options.modelInfo.contextPercent,
     );
     if (!line) continue;
     lines.push(

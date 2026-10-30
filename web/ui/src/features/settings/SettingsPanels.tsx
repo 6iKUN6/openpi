@@ -1,24 +1,31 @@
+import { RuntimeInfoPanel } from "./RuntimeInfoPanel.tsx";
+import { SettingsSelect } from "./SettingsSelect.tsx";
 import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { Button } from "@astryxdesign/core/Button";
 import { Slider } from "@astryxdesign/core/Slider";
 import { Switch } from "@astryxdesign/core/Switch";
 import {
-  Bot,
   Check,
+  ChevronDown,
   Clipboard,
   Code2,
+  CornerDownRight,
   Cpu,
   ExternalLink,
   FileText,
   FolderCog,
   Gauge,
   KeyRound,
+  ListPlus,
+  PanelBottom,
   Plug,
   Plus,
   RefreshCw,
   Search,
   Sparkles,
+  Terminal,
   Wrench,
+  type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -60,6 +67,43 @@ function SettingsLoadState({
       <button type="button" onClick={onRefresh}>
         {t("retryAdmissionCheck")}
       </button>
+    </div>
+  );
+}
+
+function SettingsToggleRow({
+  icon: Icon,
+  title,
+  description,
+  value,
+  disabled,
+  loading,
+  onChange,
+}: {
+  icon: LucideIcon;
+  title: string;
+  description?: string;
+  value: boolean;
+  disabled: boolean;
+  loading: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="settings-inline-control settings-toggle-row">
+      <Icon aria-hidden="true" />
+      <span className="settings-inline-copy">
+        <strong>{title}</strong>
+        {description && <small>{description}</small>}
+      </span>
+      <Switch
+        label={title}
+        isLabelHidden
+        value={value}
+        size="sm"
+        isDisabled={disabled}
+        isLoading={loading}
+        onChange={onChange}
+      />
     </div>
   );
 }
@@ -173,7 +217,7 @@ export function GeneralSettingsPanel({
   useEffect(() => setMaxCalls(configuredCalls), [configuredCalls]);
 
   return (
-    <section className="settings-general-panel">
+    <section className="settings-content-page settings-general-panel">
       <div className="settings-page-heading">
         <div>
           <h1>{t("generalSettings")}</h1>
@@ -201,27 +245,63 @@ export function GeneralSettingsPanel({
       {setup && (
         <>
           <section className="settings-section-block">
+            <div className="settings-follow-up-control">
+              <div>
+                <h2>{t("followUpBehavior")}</h2>
+                <p>{t("followUpBehaviorDetail")}</p>
+              </div>
+              <fieldset
+                className="settings-follow-up-choices"
+                disabled={preferencePending}
+              >
+                <legend className="sr-only">{t("followUpBehavior")}</legend>
+                {(["followUp", "steer"] as const).map((mode) => (
+                  <label key={mode}>
+                    <input
+                      type="radio"
+                      name="follow-up-behavior"
+                      value={mode}
+                      aria-label={t(
+                        mode === "steer" ? "followUpSteer" : "followUpQueue",
+                      )}
+                      checked={
+                        (setup.ui.webFollowUpBehavior ?? "followUp") === mode
+                      }
+                      onChange={() =>
+                        void onUpdatePreferences({ followUpBehavior: mode })
+                      }
+                    />
+                    <span className="settings-follow-up-option">
+                      {mode === "steer" ? (
+                        <CornerDownRight aria-hidden="true" />
+                      ) : (
+                        <ListPlus aria-hidden="true" />
+                      )}
+                      <span className="settings-follow-up-option-copy">
+                        <strong>
+                          {t(
+                            mode === "steer"
+                              ? "followUpSteer"
+                              : "followUpQueue",
+                          )}
+                        </strong>
+                        <small>
+                          {t(
+                            mode === "steer"
+                              ? "followUpSteerDetail"
+                              : "followUpQueueDetail",
+                          )}
+                        </small>
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+            </div>
+          </section>
+          <section className="settings-section-block">
             <h2>{t("agentBehavior")}</h2>
             <div className="settings-chat-controls">
-              <label className="settings-inline-control">
-                <Sparkles aria-hidden="true" />
-                <span>{t("capabilityDiscovery")}</span>
-                <select
-                  value={setup.capabilities.discovery}
-                  disabled={setupPending || setupBlocked}
-                  onChange={(event) =>
-                    void onConfigure(
-                      t("setupRequestDiscovery", { mode: event.target.value }),
-                    )
-                  }
-                >
-                  {(["explicit", "adaptive"] as const).map((mode) => (
-                    <option key={mode} value={mode}>
-                      {t(`capabilityDiscovery_${mode}`)}
-                    </option>
-                  ))}
-                </select>
-              </label>
               <form
                 className="settings-limits-control"
                 onSubmit={(event) => {
@@ -280,15 +360,13 @@ export function GeneralSettingsPanel({
                   {t("configureViaSetup")}
                 </button>
               </form>
-              <Switch
-                label={t("nextActionSuggestions")}
+              <SettingsToggleRow
+                icon={Sparkles}
+                title={t("nextActionSuggestions")}
+                description={t("nextActionSuggestionsDetail")}
                 value={setup.suggestions.enabled}
-                size="sm"
-                width="100%"
-                labelPosition="start"
-                labelSpacing="spread"
-                isDisabled={setupPending || setupBlocked}
-                isLoading={setupPending}
+                disabled={setupPending || setupBlocked}
+                loading={setupPending}
                 onChange={(checked: boolean) =>
                   void onConfigure(
                     t(
@@ -304,9 +382,14 @@ export function GeneralSettingsPanel({
               )}
               <div className="settings-inline-control">
                 <Code2 aria-hidden="true" />
-                <span>
-                  {t("postEditCommand")} ·{" "}
-                  {t(setup.postEditConfigured ? "configured" : "disabled")}
+                <span className="settings-inline-copy">
+                  <strong>
+                    {t("postEditCommand")}
+                    <span className="settings-inline-status">
+                      {t(setup.postEditConfigured ? "configured" : "disabled")}
+                    </span>
+                  </strong>
+                  <small>{t("postEditCommandDetail")}</small>
                 </span>
                 <SetupAction
                   isPending={setupPending}
@@ -325,49 +408,62 @@ export function GeneralSettingsPanel({
             <div className="settings-chat-controls">
               {(
                 [
-                  ["subagentResultDisplay", "subagentResults"],
-                  ["bashToolDisplay", "bashOperations"],
-                  ["fileMutationDisplay", "fileMutations"],
+                  ["subagentResultDisplay", "subagentResults", Cpu],
+                  ["bashToolDisplay", "bashOperations", Terminal],
+                  ["fileMutationDisplay", "fileMutations", FileText],
                 ] as const
-              ).map(([key, label]) => (
-                <label key={key} className="settings-inline-control">
-                  <span>{t(label)}</span>
-                  <select
+              ).map(([key, label, Icon]) => (
+                <label
+                  key={key}
+                  className="settings-inline-control"
+                  htmlFor={`settings-${key}`}
+                >
+                  <Icon aria-hidden="true" />
+                  <span className="settings-inline-copy">
+                    <strong>{t(label)}</strong>
+                  </span>
+                  <SettingsSelect
+                    id={`settings-${key}`}
+                    className="settings-select-control"
+                    label={t(label)}
                     value={setup.ui[key]}
                     disabled={preferencePending}
-                    onChange={(event) => {
-                      const value = event.target.value;
+                    onChange={(value) => {
                       if (value === "full" || value === "compact")
                         void onUpdatePreferences({ [key]: value });
                     }}
-                  >
-                    <option value="compact">
-                      {t("detailDisplay_compact")}
-                    </option>
-                    <option value="full">{t("detailDisplay_full")}</option>
-                  </select>
+                    options={[
+                      {
+                        value: "compact",
+                        label: t("detailDisplay_compact"),
+                      },
+                      { value: "full", label: t("detailDisplay_full") },
+                    ]}
+                  />
                 </label>
               ))}
-              <Switch
-                label={t("terminalFooter")}
+              <SettingsToggleRow
+                icon={PanelBottom}
+                title={t("terminalFooter")}
                 value={setup.ui.customFooter}
-                size="sm"
-                width="100%"
-                labelPosition="start"
-                labelSpacing="spread"
-                isDisabled={preferencePending}
-                isLoading={preferencePending}
+                disabled={preferencePending}
+                loading={preferencePending}
                 onChange={(checked: boolean) =>
                   void onUpdatePreferences({ customFooter: checked })
                 }
               />
-              <label className="settings-inline-control">
+              <label
+                className="settings-inline-control"
+                htmlFor="settings-footer-style"
+              >
                 <span>{t("terminalFooterStyle")}</span>
-                <select
+                <SettingsSelect
+                  id="settings-footer-style"
+                  className="settings-select-control"
+                  label={t("terminalFooterStyle")}
                   value={setup.ui.footerStyle}
                   disabled={preferencePending || !setup.ui.customFooter}
-                  onChange={(event) => {
-                    const value = event.target.value;
+                  onChange={(value) => {
                     if (
                       value === "plain" ||
                       value === "powerline" ||
@@ -375,17 +471,20 @@ export function GeneralSettingsPanel({
                     )
                       void onUpdatePreferences({ footerStyle: value });
                   }}
-                >
-                  <option value="plain">Plain</option>
-                  <option value="powerline">Powerline</option>
-                  <option value="powerline-mono">Powerline Mono</option>
-                </select>
+                  options={[
+                    { value: "plain", label: "Plain" },
+                    { value: "powerline", label: "Powerline" },
+                    { value: "powerline-mono", label: "Powerline Mono" },
+                  ]}
+                />
               </label>
               <small>{t("terminalFooterHint")}</small>
             </div>
           </section>
         </>
       )}
+
+      <RuntimeInfoPanel />
 
       <section className="settings-section-block">
         <h2>{t("sessionSettings")}</h2>
@@ -440,9 +539,7 @@ function ResourceToolbar({
   return (
     <div className="settings-resource-toolbar">
       <div className="settings-resource-toolbar-heading">
-        <strong>
-          {t(kind === "skills" ? "skillsSettings" : "pluginsSettings")}
-        </strong>
+        <strong>{t("resources")}</strong>
         <Button
           label={t(kind === "skills" ? "addSkill" : "addPlugin")}
           variant="secondary"
@@ -461,18 +558,18 @@ function ResourceToolbar({
           onChange={(event) => onQuery(event.target.value)}
         />
       </label>
-      <select
-        aria-label={t("filterResourceScope")}
+      <SettingsSelect
+        label={t("filterResourceScope")}
         value={scope}
-        onChange={(event) => onScope(event.target.value)}
-      >
-        <option value="all">{t("allResourceScopes")}</option>
-        {(["project", "user", "temporary"] as const).map((value) => (
-          <option key={value} value={value}>
-            {t(`resourceScope_${value}`)}
-          </option>
-        ))}
-      </select>
+        onChange={onScope}
+        options={[
+          { value: "all", label: t("allResourceScopes") },
+          ...(["project", "user", "temporary"] as const).map((value) => ({
+            value,
+            label: t(`resourceScope_${value}`),
+          })),
+        ]}
+      />
     </div>
   );
 }
@@ -495,8 +592,7 @@ function ResourceInstallForm({
     <section className="settings-resource-install">
       <header className="settings-detail-heading">
         <div>
-          <span>{t("resourceManagement")}</span>
-          <h1>{t(kind === "skills" ? "addSkill" : "addPlugin")}</h1>
+          <h2>{t(kind === "skills" ? "addSkill" : "addPlugin")}</h2>
           <p>{t("resourceInstallIntro")}</p>
         </div>
       </header>
@@ -529,18 +625,19 @@ function ResourceInstallForm({
             }}
           />
         </label>
-        <label className="settings-form-field">
+        <label className="settings-form-field" htmlFor="resource-install-scope">
           {t("scope")}
-          <select
+          <SettingsSelect
+            id="resource-install-scope"
+            label={t("scope")}
             value={scope}
             disabled={pending}
-            onChange={(event) => {
-              setScope(event.target.value);
-            }}
-          >
-            <option value="user">{t("resourceScope_user")}</option>
-            <option value="project">{t("resourceScope_project")}</option>
-          </select>
+            onChange={setScope}
+            options={[
+              { value: "user", label: t("resourceScope_user") },
+              { value: "project", label: t("resourceScope_project") },
+            ]}
+          />
         </label>
         <div className="settings-resource-actions">
           <Button
@@ -750,7 +847,13 @@ export function SkillsSettingsPanel({
   };
 
   return (
-    <section className="settings-split-panel settings-managed-panel">
+    <section className="settings-content-page settings-managed-panel">
+      <header className="settings-page-heading">
+        <div>
+          <h1>{t("skillsSettings")}</h1>
+          <p>{t("skillsEmptyIntro")}</p>
+        </div>
+      </header>
       <aside className="settings-resource-sidebar">
         <ResourceToolbar
           kind="skills"
@@ -836,10 +939,7 @@ export function SkillsSettingsPanel({
           <>
             <header className="settings-detail-heading">
               <div>
-                <span>
-                  {t(`resourceScope_${selected.scope}`)} · {t("skill")}
-                </span>
-                <h1>{selected.name}</h1>
+                <h2>{selected.name}</h2>
                 <p>{selected.description}</p>
               </div>
               <Button
@@ -947,10 +1047,9 @@ export function SkillsSettingsPanel({
         ) : (
           <div className="settings-empty-detail">
             <Sparkles aria-hidden="true" />
-            <h1>
+            <h2>
               {t(skills.length ? "noMatchingResources" : "skillsEmptyTitle")}
-            </h1>
-            <p>{t("skillsEmptyIntro")}</p>
+            </h2>
             <Button
               label={t("addSkill")}
               variant="secondary"
@@ -1046,166 +1145,162 @@ export function SubagentsSettingsPanel({
     activity?.items.filter((item) => item.status !== "running").length ?? 0;
 
   return (
-    <section className="settings-subagents-panel">
-      <header className="settings-subagent-summary">
+    <section className="settings-content-page settings-subagents-panel">
+      <header className="settings-page-heading">
         <div>
-          <strong>{t("subagentConfiguration")}</strong>
-          <span>{t("subagentConfigurationIntro")}</span>
+          <h1>{t("subagentsSettings")}</h1>
+          <p>{t("subagentConfigurationIntro")}</p>
         </div>
-        {catalog && (
-          <div className="settings-subagent-metrics">
-            <span>{t("subagentActiveCount", { count: active })}</span>
-            <span>{t("subagentCompletedCount", { count: completed })}</span>
-            <span>
-              {t("subagentConcurrency", {
-                count: catalog.setup.workflows.concurrency,
-              })}
-            </span>
-          </div>
-        )}
+        <SetupAction
+          isPending={setupPending}
+          isBlocked={setupBlocked}
+          onConfigure={onConfigure}
+          request={t("setupRequestSubagents")}
+          label={t("configureRoles")}
+        />
       </header>
-      <div className="settings-split-panel settings-subagent-split">
-        <aside className="settings-resource-sidebar">
-          <div className="settings-resource-list">
-            <span className="settings-sidebar-label">{t("builtInRoles")}</span>
-            {roles.map((role) => (
-              <button
-                key={role}
-                type="button"
-                className="settings-resource-item"
-                aria-current={role === selectedRole ? "page" : undefined}
-                onClick={() => setSelectedRole(role)}
-              >
-                <Bot aria-hidden="true" />
-                <span>
-                  <strong>{t(`subagentRole_${role}`)}</strong>
-                  <small>{t(`subagentRoleShort_${role}`)}</small>
-                </span>
-              </button>
-            ))}
-          </div>
-          <div className="settings-sidebar-footer settings-sidebar-footer-action">
-            <SetupAction
-              isPending={setupPending}
-              isBlocked={setupBlocked}
-              onConfigure={onConfigure}
-              request={t("setupRequestSubagents")}
-              label={t("configureRoles")}
-            />
-          </div>
-        </aside>
-        <div className="settings-resource-detail">
-          <SettingsLoadState
-            catalog={catalog}
-            error={error}
-            onRefresh={onRefresh}
+      <SettingsLoadState
+        catalog={catalog}
+        error={error}
+        onRefresh={onRefresh}
+      />
+      <div className="settings-control-group">
+        <label className="settings-control-row" htmlFor="subagent-role">
+          <span className="settings-control-copy">
+            <strong>{t("builtInRoles")}</strong>
+            <span>{t(`subagentRoleShort_${selectedRole}`)}</span>
+          </span>
+          <SettingsSelect
+            id="subagent-role"
+            name="subagentRole"
+            label={t("builtInRoles")}
+            value={selectedRole}
+            onChange={(value) => {
+              const role = roles.find((item) => item === value);
+              if (role) setSelectedRole(role);
+            }}
+            options={roles.map((role) => ({
+              value: role,
+              label: t(`subagentRole_${role}`),
+            }))}
           />
-          {catalog && (
-            <>
-              <header className="settings-detail-heading">
-                <div>
-                  <span>{t("builtInRole")}</span>
-                  <h1>{t(`subagentRole_${selectedRole}`)}</h1>
-                  <p>{t(`subagentRoleDescription_${selectedRole}`)}</p>
-                </div>
-                <span className="settings-status-badge">{t("builtIn")}</span>
-              </header>
-              <dl className="settings-detail-metadata settings-detail-metadata-wide">
-                <div>
-                  <dt>{t("modelAssignment")}</dt>
-                  <dd>
-                    {assignment
-                      ? `${assignment.provider}/${assignment.model}`
-                      : t("inheritParentModel")}
-                  </dd>
-                </div>
-                <div>
-                  <dt>{t("effectiveModel")}</dt>
-                  <dd>
+        </label>
+      </div>
+      <div className="settings-role-detail">
+        {catalog && (
+          <>
+            <header className="settings-detail-heading">
+              <div>
+                <h2>{t(`subagentRole_${selectedRole}`)}</h2>
+                <p>{t(`subagentRoleDescription_${selectedRole}`)}</p>
+              </div>
+            </header>
+            <form
+              className="settings-edit-form settings-role-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (setupPending || setupBlocked) return;
+                void onConfigure(
+                  t("setupRoleFormRequest", {
+                    role: selectedRole,
+                    model: roleModel || t("inheritParentModel"),
+                    concurrency,
+                  }),
+                );
+              }}
+            >
+              <div className="settings-control-group">
+                <label className="settings-control-row" htmlFor="role-model">
+                  <span className="settings-control-copy">
+                    <strong>{t("modelAssignment")}</strong>
+                  </span>
+                  <SettingsSelect
+                    id="role-model"
+                    name="roleModel"
+                    label={t("modelAssignment")}
+                    value={roleModel}
+                    disabled={setupPending || setupBlocked}
+                    onChange={setRoleModel}
+                    menuWidth="min(380px, calc(100vw - 32px))"
+                    options={[
+                      { value: "", label: t("inheritParentModel") },
+                      ...(roleModel &&
+                      !models.some(
+                        (model) =>
+                          `${model.provider}/${model.id}` === roleModel,
+                      )
+                        ? [{ value: roleModel, label: roleModel }]
+                        : []),
+                      ...models.map((model) => ({
+                        value: `${model.provider}/${model.id}`,
+                        label: model.label,
+                      })),
+                    ]}
+                  />
+                </label>
+                <div className="settings-control-row">
+                  <span className="settings-control-copy">
+                    <strong>{t("effectiveModel")}</strong>
+                  </span>
+                  <span className="settings-control-value">
                     {assignment
                       ? `${assignment.provider}/${assignment.model}`
                       : (currentModel?.label ?? t("unknownState"))}
-                  </dd>
+                  </span>
                 </div>
-                <div>
-                  <dt>{t("workflowConcurrencyLabel")}</dt>
-                  <dd>{catalog.setup.workflows.concurrency}</dd>
+                <label className="settings-control-row">
+                  <span className="settings-control-copy">
+                    <strong>{t("workflowConcurrencyLabel")}</strong>
+                  </span>
+                  <input
+                    name="concurrency"
+                    type="number"
+                    autoComplete="off"
+                    min={1}
+                    max={64}
+                    required
+                    value={concurrency}
+                    disabled={setupPending || setupBlocked}
+                    onChange={(event) =>
+                      setConcurrency(Number(event.target.value))
+                    }
+                  />
+                </label>
+                <div className="settings-control-row">
+                  <span className="settings-control-copy">
+                    <strong>{t("workflowCallLimit")}</strong>
+                  </span>
+                  <span className="settings-control-value">
+                    {catalog.setup.workflows.maxAgentCalls}
+                  </span>
                 </div>
-                <div>
-                  <dt>{t("workflowCallLimit")}</dt>
-                  <dd>{catalog.setup.workflows.maxAgentCalls}</dd>
-                </div>
-              </dl>
-              <section className="settings-role-principles">
-                <form
-                  className="settings-edit-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    if (setupPending) return;
-                    void onConfigure(
-                      t("setupRoleFormRequest", {
-                        role: selectedRole,
-                        model: roleModel || t("inheritParentModel"),
-                        concurrency,
-                      }),
-                    );
-                  }}
-                >
-                  <label className="settings-form-field">
-                    {t("modelAssignment")}
-                    <select
-                      value={roleModel}
-                      disabled={setupPending}
-                      onChange={(event) => setRoleModel(event.target.value)}
-                    >
-                      <option value="">{t("inheritParentModel")}</option>
-                      {roleModel &&
-                        !models.some(
-                          (model) =>
-                            `${model.provider}/${model.id}` === roleModel,
-                        ) && <option value={roleModel}>{roleModel}</option>}
-                      {models.map((model) => (
-                        <option
-                          key={`${model.provider}/${model.id}`}
-                          value={`${model.provider}/${model.id}`}
-                        >
-                          {model.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="settings-form-field">
-                    {t("workflowConcurrencyLabel")}
-                    <input
-                      type="number"
-                      min={1}
-                      max={64}
-                      required
-                      value={concurrency}
-                      disabled={setupPending}
-                      onChange={(event) =>
-                        setConcurrency(Number(event.target.value))
-                      }
-                    />
-                  </label>
-                  <button type="submit" disabled={setupPending}>
-                    {t("configureViaSetup")}
-                  </button>
-                  <small>{t("setupFormDetail")}</small>
-                </form>
-                <h2>{t("runtimeBoundaries")}</h2>
-                <div>
+              </div>
+              <button type="submit" disabled={setupPending || setupBlocked}>
+                {t("configureViaSetup")}
+              </button>
+              <small className="settings-resource-caption">
+                {t("setupFormDetail")}
+              </small>
+            </form>
+            <section className="settings-role-principles">
+              <h2>{t("runtimeBoundaries")}</h2>
+              <div className="settings-control-group">
+                <div className="settings-control-row">
                   <KeyRound aria-hidden="true" />
                   <p>{t("subagentAuthorityNote")}</p>
                 </div>
-                <div>
+                <div className="settings-control-row">
                   <Cpu aria-hidden="true" />
                   <p>{t("subagentModelNote")}</p>
                 </div>
-              </section>
-            </>
-          )}
-        </div>
+              </div>
+              <p className="settings-resource-caption">
+                {t("subagentActiveCount", { count: active })} ·{" "}
+                {t("subagentCompletedCount", { count: completed })}
+              </p>
+            </section>
+          </>
+        )}
       </div>
     </section>
   );
@@ -1288,7 +1383,13 @@ export function PluginsSettingsPanel({
   }, [plugins, selectedId]);
 
   return (
-    <section className="settings-split-panel settings-managed-panel">
+    <section className="settings-content-page settings-managed-panel">
+      <header className="settings-page-heading">
+        <div>
+          <h1>{t("pluginsSettings")}</h1>
+          <p>{t("pluginsEmptyIntro")}</p>
+        </div>
+      </header>
       <aside className="settings-resource-sidebar">
         <ResourceToolbar
           kind="plugins"
@@ -1367,8 +1468,7 @@ export function PluginsSettingsPanel({
           <>
             <header className="settings-detail-heading">
               <div>
-                <span>{t(`resourceScope_${selected.scope}`)}</span>
-                <h1>{sourceLabel(selected)}</h1>
+                <h2>{sourceLabel(selected)}</h2>
                 <code>{selected.source}</code>
               </div>
               <span
@@ -1500,10 +1600,9 @@ export function PluginsSettingsPanel({
         ) : (
           <div className="settings-empty-detail">
             <Plug aria-hidden="true" />
-            <h1>
+            <h2>
               {t(plugins.length ? "noMatchingResources" : "pluginsEmptyTitle")}
-            </h1>
-            <p>{t("pluginsEmptyIntro")}</p>
+            </h2>
             <Button
               label={t("addPlugin")}
               variant="secondary"

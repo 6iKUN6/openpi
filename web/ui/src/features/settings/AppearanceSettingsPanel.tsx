@@ -13,7 +13,7 @@ import {
   RefreshCw,
   RotateCcw,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   WebAppearancePreference,
@@ -51,6 +51,7 @@ function AppearanceMenu({
   const selected = options.find((option) => option.id === value);
   return (
     <DropdownMenu
+      className="settings-select-menu"
       button={{
         label: selected?.label ?? value,
         "aria-label": label,
@@ -74,6 +75,7 @@ function AppearanceMenu({
       items={options.map((option) => ({
         id: option.id || "default",
         label: option.label,
+        isDisabled: disabled,
         ...(option.color
           ? {
               icon: (
@@ -85,7 +87,11 @@ function AppearanceMenu({
             }
           : {}),
         endContent:
-          value === option.id ? <Check aria-hidden="true" /> : undefined,
+          value === option.id ? (
+            <span className="settings-select-check" aria-hidden="true">
+              <Check />
+            </span>
+          ) : undefined,
         onClick: () => onSelect(option.id),
       }))}
     />
@@ -106,13 +112,15 @@ function AppearanceColor({
   onSave: (color: string) => Promise<boolean>;
 }) {
   const saved = (value || fallback).toUpperCase();
+  const latestSaved = useRef(saved);
+  latestSaved.current = saved;
   const [draft, setDraft] = useState(saved);
   useEffect(() => setDraft(saved), [saved]);
   const save = (color: string) => {
     setDraft(color);
     if (color !== saved && /^#[0-9a-f]{6}$/iu.test(color))
       void onSave(color).then((ok) => {
-        if (!ok) setDraft(saved);
+        if (!ok) setDraft(latestSaved.current);
       });
   };
   return (
@@ -171,18 +179,24 @@ export function AppearanceSettingsPanel({
   const [copyStatus, setCopyStatus] = useState<"saved" | "failed" | null>(null);
   const [chatWidth, setChatWidth] = useState(setup?.ui.webChatWidth ?? 820);
   const [fontSize, setFontSize] = useState(setup?.ui.webChatFontSize ?? 14);
+  const savedLayout = useRef({ chatWidth, fontSize });
+  if (setup)
+    savedLayout.current = {
+      chatWidth: setup.ui.webChatWidth,
+      fontSize: setup.ui.webChatFontSize,
+    };
   useEffect(() => {
     if (!setup) return;
     setChatWidth(setup.ui.webChatWidth);
     setFontSize(setup.ui.webChatFontSize);
   }, [setup]);
-  const disabled = pending || !setup || !!error;
+  const unreadable =
+    catalog?.setupWritable === false ||
+    !!catalog?.resources.diagnostics.settingsErrors;
+  const disabled = pending || !setup || !!error || unreadable;
   const parsedImport = parseAppearanceTheme(importValue);
   const saveAppearance = (patch: Partial<WebAppearancePreference>) =>
-    onUpdatePreferences({
-      theme: mode,
-      appearance: { ...appearance, palette, ...patch },
-    });
+    onUpdatePreferences({ appearance: patch });
   const closeImport = () => {
     if (pending) return;
     setImportOpen(false);
@@ -196,13 +210,22 @@ export function AppearanceSettingsPanel({
   return (
     <section className="settings-content-page settings-appearance-panel">
       <h1>{t("appearance")}</h1>
-      {(!setup || error) && (
-        <div className="settings-load-state" role={error ? "alert" : "status"}>
+      {(!setup || error || unreadable) && (
+        <div
+          className="settings-load-state"
+          role={error || unreadable ? "alert" : "status"}
+        >
           <RefreshCw aria-hidden="true" />
           <span>
-            {t(error ? "settingsCatalogFailed" : "settingsCatalogLoading")}
+            {t(
+              unreadable
+                ? "configurationReadFailure"
+                : error
+                  ? "settingsCatalogFailed"
+                  : "settingsCatalogLoading",
+            )}
           </span>
-          {error && (
+          {(error || unreadable) && (
             <button type="button" onClick={onRefresh}>
               {t("retryAdmissionCheck")}
             </button>
@@ -245,12 +268,7 @@ export function AppearanceSettingsPanel({
                     )}
                     checked={mode === id}
                     disabled={disabled}
-                    onChange={() =>
-                      void onUpdatePreferences({
-                        theme: id,
-                        appearance: { ...appearance, palette },
-                      })
-                    }
+                    onChange={() => void onUpdatePreferences({ theme: id })}
                   />
                   <span
                     aria-hidden="true"
@@ -281,6 +299,15 @@ export function AppearanceSettingsPanel({
                           <em />
                         </span>
                       </span>
+                    )}
+                  </span>
+                  <span className="appearance-mode-label">
+                    {t(
+                      id === "system"
+                        ? "themeSystem"
+                        : id === "light"
+                          ? "themeLight"
+                          : "themeDark",
                     )}
                   </span>
                 </label>
@@ -325,23 +352,71 @@ export function AppearanceSettingsPanel({
                   <Copy aria-hidden="true" />
                 </button>
               </Tooltip>
-              <AppearanceMenu
-                label={t("appearanceTheme")}
-                value={palette}
-                options={palettes.map((id) => ({
-                  id,
-                  label:
-                    id === "default"
-                      ? "OpenPI"
-                      : t(`theme${id[0]!.toUpperCase()}${id.slice(1)}`),
-                }))}
-                disabled={disabled}
-                onSelect={(id) => {
-                  const next = palettes.find((item) => item === id);
-                  if (next) void saveAppearance({ palette: next });
-                }}
-              />
             </div>
+          </div>
+          <div
+            role="radiogroup"
+            aria-label={t("appearanceTheme")}
+            aria-busy={pending}
+            className="appearance-palette-options"
+          >
+            {palettes.map((id) => {
+              const colors = appearanceColors(id, dark);
+              const label =
+                id === "default"
+                  ? "OpenPI"
+                  : t(`theme${id[0]!.toUpperCase()}${id.slice(1)}`);
+              return (
+                <label key={id} className="appearance-palette-option">
+                  <input
+                    type="radio"
+                    name="openpi-appearance-palette"
+                    aria-label={label}
+                    checked={palette === id}
+                    disabled={disabled}
+                    onChange={() => void saveAppearance({ palette: id })}
+                  />
+                  <span
+                    className="appearance-palette-preview"
+                    aria-hidden="true"
+                    style={{
+                      background: colors.background,
+                      color: colors.foreground,
+                    }}
+                  >
+                    <span
+                      className="appearance-palette-shell"
+                      style={{ background: colors.sidebar }}
+                    >
+                      <span className="appearance-palette-sidebar">
+                        <b />
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                      <span
+                        className="appearance-palette-canvas"
+                        style={{ background: colors.background }}
+                      >
+                        <b />
+                        <i />
+                        <i />
+                        <em style={{ borderColor: colors.accent }}>
+                          <span
+                            className="appearance-palette-send"
+                            style={{ background: colors.accent }}
+                          />
+                        </em>
+                      </span>
+                    </span>
+                    <span className="appearance-palette-check">
+                      <Check />
+                    </span>
+                  </span>
+                  <span className="appearance-palette-label">{label}</span>
+                </label>
+              );
+            })}
           </div>
           <div className="appearance-row">
             <span>{t("appearanceAccent")}</span>
@@ -390,7 +465,7 @@ export function AppearanceSettingsPanel({
             <span>{t("appearanceFont")}</span>
             <AppearanceMenu
               label={t("appearanceFont")}
-              value={appearance.font}
+              value={appearance.font === "system" ? "codex" : appearance.font}
               options={fonts.map((id) => ({
                 id,
                 label: t(`appearanceFont_${id}`),
@@ -461,7 +536,7 @@ export function AppearanceSettingsPanel({
                   onClick={() => {
                     setChatWidth(820);
                     void onUpdatePreferences({ chatWidth: 820 }).then((ok) => {
-                      if (!ok) setChatWidth(setup.ui.webChatWidth);
+                      if (!ok) setChatWidth(savedLayout.current.chatWidth);
                     });
                   }}
                 >
@@ -483,7 +558,7 @@ export function AppearanceSettingsPanel({
                   if (value !== setup.ui.webChatWidth)
                     void onUpdatePreferences({ chatWidth: value }).then(
                       (ok) => {
-                        if (!ok) setChatWidth(setup.ui.webChatWidth);
+                        if (!ok) setChatWidth(savedLayout.current.chatWidth);
                       },
                     );
                 }}
@@ -502,7 +577,7 @@ export function AppearanceSettingsPanel({
                     setFontSize(14);
                     void onUpdatePreferences({ chatFontSize: 14 }).then(
                       (ok) => {
-                        if (!ok) setFontSize(setup.ui.webChatFontSize);
+                        if (!ok) setFontSize(savedLayout.current.fontSize);
                       },
                     );
                   }}
@@ -525,7 +600,7 @@ export function AppearanceSettingsPanel({
                   if (value !== setup.ui.webChatFontSize)
                     void onUpdatePreferences({ chatFontSize: value }).then(
                       (ok) => {
-                        if (!ok) setFontSize(setup.ui.webChatFontSize);
+                        if (!ok) setFontSize(savedLayout.current.fontSize);
                       },
                     );
                 }}

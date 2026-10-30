@@ -1,4 +1,5 @@
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { LiveToolEvidence } from "../protocol/evidence.ts";
 import type {
   PlanControlResult,
@@ -15,6 +16,7 @@ import type {
 } from "../protocol/types.ts";
 import type { WebProjectTrustStatus } from "./trust-status.ts";
 import type { WebProviderLogin } from "../protocol/provider-login.ts";
+import type { WebSessionForkSnapshot, WebSessionForkWorktree } from "../protocol/session-fork.ts";
 
 export type WebProviderAuthSource =
   | "stored"
@@ -55,6 +57,8 @@ export interface WebModelConfiguration {
   baseUrl: string;
   api: "openai-responses" | "openai-completions" | "anthropic-messages";
   reasoning: boolean;
+  /** Native Pi model capability map; null explicitly removes the override. */
+  thinkingLevelMap?: ThinkingLevelMap | null;
   contextWindow?: number;
   maxTokens?: number;
   input?: ("text" | "image")[];
@@ -64,6 +68,8 @@ export interface WebModelConfigurations {
   revision: string;
   models: WebModelConfiguration[];
   providers?: WebProviderConfigurationSummary[];
+  /** Read-only native catalog defaults, independent of saved per-model overrides. */
+  thinkingDefaults?: Record<string, ThinkingLevelMap>;
 }
 
 /** Pi-owned global default; trusted project settings may override it. */
@@ -106,8 +112,20 @@ export type WebRuntimeRequestErrorCode =
   | "MODEL_CONFIGURATION_CONFLICT"
   | "PROVIDER_LOGIN_CONFLICT"
   | "SESSION_CONFLICT"
+  | "SESSION_READ_STATE_CHANGED"
+  | "SIDEBAR_PIN_CHANGED"
   | "SESSION_FORK_UNAVAILABLE"
   | "SESSION_FORK_CAPACITY"
+  | "SESSION_DELETE_UNAVAILABLE"
+  | "SESSION_DELETE_CAPACITY"
+  | "SESSION_DELETE_BUSY"
+  | "WORKSPACE_ORDER_CHANGED"
+  | "WORKSPACE_NOT_FOUND"
+  | "INVALID_WORKTREE_RELEASE"
+  | "WORKTREE_RELEASE_UNAVAILABLE"
+  | "WORKTREE_LIST_CHANGED"
+  | "SESSION_MARKDOWN_TOO_LARGE"
+  | "SESSION_OPEN_UNAVAILABLE"
   | "TURN_CONFLICT"
   | "PROMPT_REJECTED"
   | "WORKSPACE_REQUIRED"
@@ -115,12 +133,12 @@ export type WebRuntimeRequestErrorCode =
 
 export class WebRuntimeRequestError extends Error {
   readonly code: WebRuntimeRequestErrorCode;
-  readonly statusCode: 400 | 409 | 422 | 501;
+  readonly statusCode: 400 | 404 | 409 | 413 | 422 | 501;
 
   constructor(
     message: string,
     code: WebRuntimeRequestErrorCode,
-    statusCode: 400 | 409 | 422 | 501,
+    statusCode: 400 | 404 | 409 | 413 | 422 | 501,
   ) {
     super(message);
     this.name = "WebRuntimeRequestError";
@@ -137,6 +155,8 @@ export interface WebPromptOptions {
   planRevision?: string;
   streamingBehavior?: "followUp" | "steer";
   expectedTurnCommandId?: string;
+  /** Retry this exact terminal provider failure without resending the user input. */
+  retryEntryId?: string;
 }
 
 export interface WebPromptAdmissionReceipt {
@@ -146,6 +166,8 @@ export interface WebPromptAdmissionReceipt {
 }
 
 export interface WebActiveTurn {
+  /** Exact Web invocation inherited by an asynchronous native continuation. */
+  originCommandId?: string;
   sessionId: string;
   commandId: string;
   epoch: number;
@@ -228,9 +250,29 @@ export interface WebSessionCreationResult {
   sessionPath?: string;
 }
 
-export interface WebSessionForkRequest extends WebHistoryAnchor {
+export type WebSessionForkRequest = {
   commandId: string;
-  rerun?: { mode: "edit"; content: string } | { mode: "regenerate" };
+  sessionId: string;
+  sessionPath: string;
+} & (
+  | { scope: "conversation"; environment?: "local" | "worktree"; entryId?: never; rerun?: never }
+  | { scope?: "message"; environment?: never; entryId: string; rerun?: { mode: "edit"; content: string } | { mode: "regenerate" } }
+);
+
+export interface WebSessionForkOptions {
+  local: boolean;
+  worktree: boolean;
+  reason?: string;
+}
+
+export interface WebSessionForkCancelRequest {
+  commandId: string;
+  sessionId: string;
+  sessionPath: string;
+}
+
+export interface WebSessionForkCancelResult {
+  state: "requested" | "too-late" | "not-found";
 }
 
 export interface WebSessionForkResult {
@@ -240,8 +282,56 @@ export interface WebSessionForkResult {
   replayed?: boolean;
   sessionId?: string;
   sessionPath?: string;
+  cwd?: string;
+  workspacePath?: string;
+  environment?: "local" | "worktree";
+  worktree?: WebSessionForkWorktree;
+  snapshot?: WebSessionForkSnapshot;
+  /** Live source status when the response was produced; the child starts idle. */
+  sourceStillRunning?: boolean;
+  reason?: string;
+  /** A checkout is preserved whenever safe cleanup cannot be established. */
+  preservedWorktreePath?: string;
   /** Prepared from the complete native user message; admission still uses /api/prompt. */
   prompt?: { content: string; images: WebPromptImage[] };
+}
+
+export interface WebSessionDeleteRequest {
+  commandId: string;
+  sessionId: string;
+  sessionPath: string;
+}
+
+export interface WebSessionDeleteResult extends WebSessionDeleteRequest {
+  state: "deleted" | "cancelled" | "uncertain";
+  replayed?: boolean;
+  /** The native active Session was replaced; the Web UI must clear its selection. */
+  activeSessionChanged?: boolean;
+  /** Retention is the default. Releasing this resource is a separate explicit action. */
+  worktreeReleaseTarget?: WebWorktreeReleaseTarget;
+}
+
+export interface WebWorktreeReleaseTarget {
+  sessionId: string;
+  sessionPath: string;
+  worktreePath: string;
+}
+
+export interface WebWorktreeReleaseRequest extends WebWorktreeReleaseTarget {
+  commandId: string;
+}
+
+export interface WebWorktreeReleaseResult extends WebWorktreeReleaseRequest {
+  state: "removed" | "preserved" | "uncertain";
+  reason?: string;
+  replayed?: boolean;
+}
+
+export interface WebRetainedWorktrees {
+  worktrees: WebWorktreeReleaseTarget[];
+  truncated: boolean;
+  unavailable: number;
+  nextCursor?: string;
 }
 
 export interface WebRuntimeController {
@@ -269,6 +359,11 @@ export interface WebRuntimeController {
   ): Promise<WebSessionCreationResult>;
   switchSession(sessionPath: string): Promise<{ cancelled: boolean }>;
   forkSession?(request: WebSessionForkRequest): Promise<WebSessionForkResult>;
+  sessionForkOptions?(request: { sessionPath: string; sessionId: string }): Promise<WebSessionForkOptions>;
+  cancelSessionFork?(request: WebSessionForkCancelRequest): Promise<WebSessionForkCancelResult>;
+  deleteSession?(request: WebSessionDeleteRequest): Promise<WebSessionDeleteResult>;
+  listRetainedWorktrees?(workspacePath: string, cursor?: string): Promise<WebRetainedWorktrees>;
+  releaseSessionWorktree?(request: WebWorktreeReleaseRequest, hasExternalHolders?: () => boolean): Promise<WebWorktreeReleaseResult>;
   listModels(): WebModelSummary[];
   searchModels(query: string, limit?: number, provider?: string): WebModelSearchResult;
   listCommands?(): WebCommandDiscoveryResult;

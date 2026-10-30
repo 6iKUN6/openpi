@@ -7,22 +7,14 @@ import {
 } from "../../scripts/node-test-groups.mjs";
 import { discoverTestFiles } from "../../scripts/discover-tests.mjs";
 
-const backgroundTest = resolve(
-  "tests",
-  "extensions",
-  "background-terminals",
-  "manager.test.ts",
-);
-const backgroundUnitTest = resolve(
-  "tests",
-  "extensions",
-  "background-terminals",
-  "output.test.ts",
-);
 const setupIntegrationTest = resolve(
   "tests/extensions/setup/integration.test.ts",
 );
 const setupUnitTest = resolve("tests/extensions/setup/index.test.ts");
+const postEditLifecycleTest = resolve(
+  "tests/extensions/post-edit/lifecycle.test.ts",
+);
+const postEditUnitTest = resolve("tests/extensions/post-edit/index.test.ts");
 const workflowExecutionTest = resolve(
   "tests/extensions/workflows/execute.e2e.test.ts",
 );
@@ -33,28 +25,21 @@ const gitInfoUnitTest = resolve(
 );
 const unrelatedTest = resolve("tests", "test-discovery.test.ts");
 
-test("Windows isolates background-terminal tests from other Node files", () => {
+test("Windows isolates real Pi lifecycles but keeps their unit tests parallel", () => {
   assert.deepEqual(
     partitionNodeTestsByPlatform(
-      [backgroundTest, unrelatedTest, backgroundUnitTest],
+      [
+        setupUnitTest,
+        setupIntegrationTest,
+        postEditUnitTest,
+        postEditLifecycleTest,
+        unrelatedTest,
+      ],
       "win32",
     ),
     {
-      parallel: [unrelatedTest],
-      serial: [backgroundTest, backgroundUnitTest],
-    },
-  );
-});
-
-test("Windows isolates the real Pi subprocess but keeps setup unit tests parallel", () => {
-  assert.deepEqual(
-    partitionNodeTestsByPlatform(
-      [setupUnitTest, setupIntegrationTest, unrelatedTest],
-      "win32",
-    ),
-    {
-      parallel: [setupUnitTest, unrelatedTest],
-      serial: [setupIntegrationTest],
+      parallel: [setupUnitTest, postEditUnitTest, unrelatedTest],
+      serial: [setupIntegrationTest, postEditLifecycleTest],
     },
   );
 });
@@ -63,23 +48,21 @@ test("non-Windows keeps all Node files in the parallel group", () => {
   assert.deepEqual(
     partitionNodeTestsByPlatform(
       [
-        backgroundTest,
         unrelatedTest,
-        backgroundUnitTest,
         setupIntegrationTest,
         workflowExecutionTest,
         gitInfoProcessTest,
+        postEditLifecycleTest,
       ],
       "linux",
     ),
     {
       parallel: [
-        backgroundTest,
         unrelatedTest,
-        backgroundUnitTest,
         setupIntegrationTest,
         workflowExecutionTest,
         gitInfoProcessTest,
+        postEditLifecycleTest,
       ],
       serial: [],
     },

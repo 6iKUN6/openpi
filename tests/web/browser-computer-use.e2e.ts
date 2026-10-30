@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, expect, test } from "@playwright/test";
+import { installConversationEntry } from "./workbench-chrome-e2e-support.ts";
 
 test("embedded computer-use targets exact same-process and cross-process documents", async ({
   baseURL,
@@ -37,12 +38,20 @@ test("embedded computer-use targets exact same-process and cross-process documen
       path: join(process.cwd(), "web/browser-extension"),
     });
     const page = context.pages()[0]!;
+    await installConversationEntry(page);
     await page.goto("/");
     await page.getByRole("button", { name: "打开工具", exact: true }).click();
     await page
-      .locator(".workbar-panel")
-      .getByRole("button", { name: /^浏览器/ })
+      .getByRole("menu", { name: "打开工具" })
+      .getByRole("menuitem", { name: /^浏览器/ })
       .click();
+    // Native readiness is acknowledged only after this tab's DNR rules install.
+    // Use the existing bounded native-control handoff budget before DENY navigation.
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-openpi-browser-extension",
+      "ready",
+      { timeout: 15_000 },
+    );
     const active = page.locator(".browser-page:not([hidden])");
     // This test covers the native provider. Host/controller and stale-state authority have separate broker tests.
     const control = (

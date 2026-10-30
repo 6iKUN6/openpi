@@ -101,7 +101,8 @@ export interface SubagentMeta {
   readonly modelLabel?: string;
   /** Context window capacity for utilization display, when known. */
   readonly contextWindow?: number;
-  /** Child session file on disk. */
+  /** Native child identity and file, retained for read-only history. */
+  readonly sessionId?: string;
   readonly sessionFilePath?: string;
 }
 
@@ -171,7 +172,11 @@ export type RunOutcome =
  */
 export type SubagentEvent =
   // lifecycle (a session can run multiple turns via send())
-  | { readonly _tag: "RunStarted"; readonly generation?: number }
+  | {
+      readonly _tag: "RunStarted";
+      readonly generation?: number;
+      readonly startEntryId?: string | null;
+    }
   | {
       readonly _tag: "RunSettled";
       readonly outcome: RunOutcome;
@@ -216,10 +221,23 @@ export type SubagentEvent =
       readonly _tag: "UsageChanged";
       readonly tokens?: number;
       readonly contextWindow?: number;
+      readonly spend?: SubagentSpend;
     }
   | { readonly _tag: "MetaChanged"; readonly meta: Partial<SubagentMeta> }
   /** Non-fatal diagnostics. Fatal failures arrive as a RunSettled outcome. */
   | { readonly _tag: "BackendError"; readonly message: string };
+
+/**
+ * Cumulative token spend for a child session, mirroring Pi `SessionStats`.
+ * Unlike `usage` (context occupancy), these counters only grow and survive
+ * compaction; a resumed child keeps accumulating.
+ */
+export interface SubagentSpend {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
+}
 
 // --- Snapshot ---------------------------------------------------------------
 
@@ -243,6 +261,8 @@ export interface SubagentSnapshot {
   readonly requestedCwd?: string;
   /** Session-local execution generation; absent on legacy snapshots. */
   readonly runGeneration?: number;
+  /** Native boundary before this run; earlier answers remain history, not its result. */
+  readonly runStartEntryId?: string | null;
   /** Generation that supplied the settled output/evidence; legacy data is unknown. */
   readonly completionGeneration?: number;
   readonly evidence?: DirectEvidenceBinding;
@@ -253,6 +273,8 @@ export interface SubagentSnapshot {
   readonly errorText?: string;
   readonly meta: SubagentMeta;
   readonly usage: { readonly tokens?: number; readonly contextWindow?: number };
+  /** Cumulative token spend across the child session. */
+  readonly spend?: SubagentSpend;
   readonly transcript: ReadonlyArray<TranscriptItem>;
   /** Monotonic version bumped on every transcript mutation (see manager). */
   readonly transcriptVersion: number;

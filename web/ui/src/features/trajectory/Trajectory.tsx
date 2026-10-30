@@ -1,30 +1,40 @@
 import type { TFunction } from "i18next";
 import {
-  ArrowUpRight,
   Check,
   ChevronRight,
   CircleHelp,
+  Clock3,
   Info,
   Lightbulb,
   ListTree,
-  MessageSquare,
   Search,
   Settings2,
   X,
 } from "lucide-react";
-import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
+import { projectToolEvidence } from "../../../../protocol/evidence.ts";
 import type { WebSnapshot } from "../../../../protocol/types.ts";
 import { compactSummary, formatTurnTime } from "../../lib/format.ts";
+import { toolActivityTarget } from "../transcript/tool-activity.ts";
+import { useSessionHistory } from "../transcript/use-session-history.ts";
+import { TrajectoryPayload } from "./TrajectoryPayload.tsx";
+import { TrajectoryTimeline } from "./TrajectoryTimeline.tsx";
+import { trajectoryRangeKeys } from "./timeline.ts";
 import {
-  toolActivity,
-  toolActivityTarget,
-} from "../transcript/tool-activity.ts";
-import {
-  buildTrajectory,
   defaultTrajectoryNode,
   groupTrajectory,
   type TrajectoryNode,
+  trajectoryDuration,
+  trajectoryRecords,
 } from "./trajectory.ts";
 import "./trajectory.css";
 
@@ -65,42 +75,47 @@ function recordPreview(node: TrajectoryNode) {
   return (
     node.input ||
     node.message?.content ||
+    node.message?.errorMessage ||
+    node.error ||
     reasoning(node) ||
     node.result?.content ||
     ""
   );
 }
 
-function RecordIcon({ node }: { node: TrajectoryNode }) {
-  const Icon =
-    node.kind === "call" || node.kind === "result"
-      ? toolActivity(node.title).Icon
-      : node.kind === "user"
-        ? ArrowUpRight
-        : node.kind === "event"
-          ? Settings2
-          : !node.message?.content && reasoning(node)
-            ? Lightbulb
-            : MessageSquare;
-  return <Icon aria-hidden="true" />;
-}
-
 function Outcome({ node }: { node: TrajectoryNode }) {
   const { t } = useTranslation();
   if (!node.outcome) return null;
+  const state =
+    node.state ??
+    (node.result
+      ? projectToolEvidence(
+          {
+            type: "toolCall",
+            name: node.title,
+            id: node.callId,
+            arguments: node.input ?? "",
+          },
+          node.result,
+        ).state
+      : undefined);
+  const distinctState =
+    state === "cancelled" || state === "timed_out" || state === "running";
+  const label = distinctState
+    ? t(`toolState_${state}`)
+    : t(`trajectory_${node.outcome}`);
   const Icon =
-    node.outcome === "returned"
-      ? Check
-      : node.outcome === "error"
-        ? X
-        : CircleHelp;
+    state === "running" || state === "timed_out"
+      ? Clock3
+      : node.outcome === "returned"
+        ? Check
+        : node.outcome === "error"
+          ? X
+          : CircleHelp;
   return (
-    <span
-      className={`trajectory-outcome ${node.outcome}`}
-      title={t(`trajectory_${node.outcome}`)}
-    >
+    <span className={`trajectory-outcome ${node.outcome}`} title={label}>
       <Icon aria-hidden="true" />
-      <span>{t(`trajectory_${node.outcome}`)}</span>
+      <span>{label}</span>
     </span>
   );
 }
@@ -109,12 +124,20 @@ function Evidence({ label, value }: { label: string; value: string }) {
   return (
     <section className="trajectory-evidence">
       <h3>{label}</h3>
-      <pre>{value}</pre>
+      <TrajectoryPayload text={value} />
     </section>
   );
 }
 
-function Inspector({ node, number }: { node: TrajectoryNode; number: number }) {
+function Inspector({
+  node,
+  number,
+  onClose,
+}: {
+  node: TrajectoryNode;
+  number: number;
+  onClose: () => void;
+}) {
   const { t, i18n } = useTranslation();
   const id = useId();
   const [tab, setTab] = useState("summary");
@@ -128,6 +151,10 @@ function Inspector({ node, number }: { node: TrajectoryNode; number: number }) {
       ? [{ key: "input", label: t("trajectoryInputTab") }]
       : []),
     ...(isTool ? [{ key: "output", label: t("trajectoryResultTab") }] : []),
+    { key: "timing", label: t("trajectoryTimingTab") },
+    ...(!isTool && message?.role === "assistant"
+      ? [{ key: "usage", label: t("trajectoryUsageTab") }]
+      : []),
   ];
   const date = node.timestamp ? new Date(node.timestamp) : null;
   const recordedAt =
@@ -142,7 +169,13 @@ function Inspector({ node, number }: { node: TrajectoryNode; number: number }) {
           value={output.content || t("noOutput")}
         />
       ) : (
-        <p className="trajectory-missing">{t("trajectoryMissingResult")}</p>
+        <p className="trajectory-missing">
+          {t(
+            node.missingOutput
+              ? "trajectoryNestedOutputMissing"
+              : "trajectoryMissingResult",
+          )}
+        </p>
       )}
       {tab === "output" && output?.details !== undefined && (
         <details className="trajectory-disclosure">
@@ -180,18 +213,27 @@ function Inspector({ node, number }: { node: TrajectoryNode; number: number }) {
       tabIndex={0}
     >
       <header className="trajectory-inspector-heading">
-        <span className="trajectory-inspector-icon">
-          <RecordIcon node={node} />
+        <span className={`trajectory-role ${node.kind}`}>
+          {t(`trajectoryRole_${node.kind}`)}
         </span>
         <div>
-          <p>
-            {isTool && <>{t(`trajectory_${node.kind}`)} · </>}
-            {t("trajectoryRecordNumber", { number })}
-          </p>
+          <p>{t("trajectoryRecordNumber", { number })}</p>
           <h2 id={`${id}-title`}>{title(node, t)}</h2>
         </div>
+        <button
+          type="button"
+          className="trajectory-inspector-close"
+          aria-label={t("close")}
+          onClick={onClose}
+        >
+          <X aria-hidden="true" />
+        </button>
       </header>
       {node.outcome && <Outcome node={node} />}
+      {node.error && <p className="trajectory-failure">{node.error}</p>}
+      {message?.errorMessage && (
+        <p className="trajectory-failure">{message.errorMessage}</p>
+      )}
       {tabs.length > 1 && (
         <div
           className="trajectory-tabs"
@@ -243,11 +285,42 @@ function Inspector({ node, number }: { node: TrajectoryNode; number: number }) {
           </p>
         )}
         {(tab === "summary" || tab === "input") && node.input !== undefined && (
-          <Evidence label={t("trajectoryArguments")} value={node.input} />
+          <TrajectoryInput node={node} />
         )}
         {(tab === "summary" || tab === "output") && isTool && result}
-        {!isTool && content}
-        {node.kind === "event" && !message && (
+        {!isTool && tab === "summary" && content}
+        {tab === "timing" && (
+          <dl className="trajectory-facts">
+            <dt>{t("trajectoryDurationLabel")}</dt>
+            <dd>{trajectoryDuration(node.durationMs)}</dd>
+            <dt>{t("trajectoryTimingSource")}</dt>
+            <dd>
+              {t(
+                node.durationMs === undefined
+                  ? "trajectoryTimingUnknown"
+                  : "trajectoryTimingNative",
+              )}
+            </dd>
+            <dt>{t("trajectoryTTFT")}</dt>
+            <dd>{t("trajectoryNotRecorded")}</dd>
+            <dt>{t("trajectoryGenerationTime")}</dt>
+            <dd>{t("trajectoryNotRecorded")}</dd>
+            <dt>{t("trajectoryThroughput")}</dt>
+            <dd>{t("trajectoryNotRecorded")}</dd>
+          </dl>
+        )}
+        {tab === "usage" && (
+          <>
+            <Usage message={message} />
+            <dl className="trajectory-facts">
+              <dt>{t("trajectoryProvider")}</dt>
+              <dd>{message?.provider ?? "—"}</dd>
+              <dt>{t("trajectoryModel")}</dt>
+              <dd>{message?.model ?? "—"}</dd>
+            </dl>
+          </>
+        )}
+        {node.kind === "event" && !message && tab === "summary" && (
           <p className="trajectory-missing">{t("trajectoryEventOnly")}</p>
         )}
         <details className="trajectory-disclosure trajectory-metadata">
@@ -285,6 +358,59 @@ function Inspector({ node, number }: { node: TrajectoryNode; number: number }) {
   );
 }
 
+function Usage({ message }: { message?: TrajectoryNode["message"] }) {
+  const { t } = useTranslation();
+  const usage = message?.usage;
+  if (!usage)
+    return <p className="trajectory-missing">{t("trajectoryUsageUnknown")}</p>;
+  return (
+    <dl className="trajectory-facts">
+      {(["input", "cacheRead", "cacheWrite", "output"] as const).map((key) => (
+        <div key={key}>
+          <dt>{t(`trajectoryUsage_${key}`)}</dt>
+          <dd>{usage[key]?.toLocaleString() ?? "—"}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function TrajectoryInput({ node }: { node: TrajectoryNode }) {
+  const { t } = useTranslation();
+  const [raw, setRaw] = useState(false);
+  let code: string | undefined;
+  if (node.title === "codemode") {
+    try {
+      const args: unknown = JSON.parse(node.input ?? "");
+      if (
+        args &&
+        typeof args === "object" &&
+        "code" in args &&
+        typeof args.code === "string"
+      )
+        code = args.code;
+    } catch {
+      /* Truncated arguments remain raw evidence. */
+    }
+  }
+  return (
+    <section className="trajectory-evidence">
+      <h3>
+        {t(code ? "trajectoryCode" : "trajectoryArguments")}
+        {code && (
+          <button type="button" aria-pressed={raw} onClick={() => setRaw(!raw)}>
+            {t("trajectoryRawArguments")}
+          </button>
+        )}
+      </h3>
+      <TrajectoryPayload
+        text={code && !raw ? code : (node.input ?? "")}
+        code={Boolean(code && !raw)}
+      />
+    </section>
+  );
+}
+
 export const Trajectory = memo(function Trajectory({
   snapshot,
   running,
@@ -293,12 +419,40 @@ export const Trajectory = memo(function Trajectory({
   running: boolean;
 }) {
   const { t } = useTranslation();
-  const entries = snapshot.selectedSession?.entries ?? EMPTY;
-  const nodes = useMemo(() => buildTrajectory(entries), [entries]);
+  const ledger = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+  const requestedScroll = useRef(false);
+  const beforePrepend = useRef<{ height: number; top: number } | null>(null);
+  const history = useSessionHistory(snapshot.selectedSession, {
+    beforePrepend: () => {
+      if (ledger.current)
+        beforePrepend.current = {
+          height: ledger.current.scrollHeight,
+          top: ledger.current.scrollTop,
+        };
+    },
+  });
+  const entries = history.session?.entries ?? EMPTY;
+  const liveTools =
+    snapshot.currentSessionPath === snapshot.selectedSession?.path
+      ? snapshot.runtime.liveTools
+      : undefined;
+  const nodes = useMemo(
+    () => trajectoryRecords(entries, liveTools),
+    [entries, liveTools],
+  );
   const [selectedKey, select] = useState<string | null>(null);
+  const [inspectorClosed, setInspectorClosed] = useState(false);
   const [query, search] = useState("");
   const [limit, setLimit] = useState(50);
   const [collapsed, collapse] = useState<ReadonlySet<string>>(new Set());
+  const [callsCollapsed, foldCalls] = useState(false);
+  const [showDuration, setShowDuration] = useState(true);
+  const [rangeSelection, setRange] = useState<{
+    start: number;
+    end: number;
+    keys: string[];
+  } | null>(null);
   const filtered = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
     return term
@@ -320,19 +474,46 @@ export const Trajectory = memo(function Trajectory({
     Math.max(0, filtered.length - limit),
     selectedIndex < 0 ? filtered.length : selectedIndex,
   );
-  const visible = filtered.slice(start);
+  const visible = filtered.slice(start, start + limit);
+  // Sequence coordinates apply only to the exact window the user selected.
+  const range =
+    rangeSelection?.keys.length === visible.length &&
+    rangeSelection.keys.every((key, index) => key === visible[index]?.key)
+      ? rangeSelection
+      : null;
+  const rangeKeys = useMemo(
+    () => trajectoryRangeKeys(visible, range),
+    [visible, range],
+  );
   const selected =
     visible.find((node) => node.key === selectedKey) ??
     defaultTrajectoryNode(visible);
-  const ledger = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const previous = beforePrepend.current;
+    if (previous && ledger.current) {
+      ledger.current.scrollTop =
+        previous.top + ledger.current.scrollHeight - previous.height;
+      beforePrepend.current = null;
+    }
+  });
   useEffect(() => {
     if (!selected?.key) return;
+    if (!following.current && !requestedScroll.current) return;
+    requestedScroll.current = false;
     ledger.current
       ?.querySelector<HTMLButtonElement>(
         '.trajectory-record[aria-pressed="true"]',
       )
       ?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [selected?.key]);
+  useEffect(() => {
+    if (inspectorClosed)
+      ledger.current
+        ?.querySelector<HTMLButtonElement>(
+          '.trajectory-record[aria-pressed="true"]',
+        )
+        ?.focus();
+  }, [inspectorClosed]);
   const grouped = useMemo(() => groupTrajectory(nodes), [nodes]);
   const shown = new Set(visible.map((node) => node.key));
   const groups = grouped.flatMap((group) => {
@@ -342,27 +523,47 @@ export const Trajectory = memo(function Trajectory({
     return runs.length ? [{ ...group, runs }] : [];
   });
   const numbers = new Map(nodes.map((node, index) => [node.key, index + 1]));
-  const truncation = snapshot.selectedSession?.truncation;
+  const truncation = history.session?.truncation;
+  const requests = nodes.filter((node) => node.kind === "assistant");
+  const tools = nodes.filter((node) => node.kind === "call");
+  const latestTiming = entries
+    .flatMap((entry) => (entry.turnTiming ? [entry.turnTiming] : []))
+    .at(-1);
   function record(node: TrajectoryNode) {
     const preview = recordPreview(node);
     return (
-      <li key={node.key}>
+      <li
+        key={node.key}
+        data-nested={Boolean(node.parentKey) || undefined}
+        data-outside-range={
+          (rangeKeys && !rangeKeys.has(node.key)) || undefined
+        }
+        hidden={callsCollapsed && node.kind === "call"}
+      >
         <button
           type="button"
           aria-pressed={node.key === selected?.key}
-          onClick={() => select(node.key)}
+          onClick={() => {
+            requestedScroll.current = true;
+            select(node.key);
+            setInspectorClosed(false);
+          }}
           className={`trajectory-record ${node.kind}`}
+          data-response-error={
+            (node.kind === "assistant" &&
+              (node.message?.stopReason === "error" ||
+                node.message?.stopReason === "aborted")) ||
+            undefined
+          }
           title={compactSummary(preview, 220)}
         >
-          <span className="trajectory-record-icon">
-            <RecordIcon node={node} />
+          <span className="trajectory-row-number">{numbers.get(node.key)}</span>
+          <span className={`trajectory-role ${node.kind}`}>
+            {t(`trajectoryRole_${node.kind}`)}
           </span>
           <span className="trajectory-record-main">
             <span className="trajectory-record-title">
               <strong>{title(node, t)}</strong>
-              <span className="trajectory-kind">
-                {t(`trajectory_${node.kind}`)}
-              </span>
             </span>
             {preview && (
               <span className="trajectory-preview">
@@ -372,7 +573,12 @@ export const Trajectory = memo(function Trajectory({
           </span>
           <span className="trajectory-record-end">
             <Outcome node={node} />
-            <time dateTime={node.timestamp}>
+            {showDuration && node.durationMs !== undefined && (
+              <span className="trajectory-row-duration">
+                {trajectoryDuration(node.durationMs)}
+              </span>
+            )}
+            <time dateTime={node.timestamp} title={t("trajectoryRecordedAt")}>
               {formatTurnTime(node.timestamp)}
             </time>
           </span>
@@ -385,7 +591,34 @@ export const Trajectory = memo(function Trajectory({
       <header className="trajectory-toolbar">
         <div className="trajectory-context">
           <ListTree aria-hidden="true" />
-          <span>{t("trajectoryOrder")}</span>
+          <button
+            type="button"
+            aria-pressed={showDuration}
+            onClick={() => setShowDuration(!showDuration)}
+          >
+            <Clock3 aria-hidden="true" />
+            {t("trajectoryDurationLabel")}
+          </button>
+          <button
+            type="button"
+            aria-pressed={collapsed.size > 0}
+            onClick={() =>
+              collapse(
+                collapsed.size
+                  ? new Set()
+                  : new Set(grouped.map((group) => group.key)),
+              )
+            }
+          >
+            {t("trajectoryFoldTurns")}
+          </button>
+          <button
+            type="button"
+            aria-pressed={callsCollapsed}
+            onClick={() => foldCalls(!callsCollapsed)}
+          >
+            {t("trajectoryFoldCalls")}
+          </button>
           <span className="trajectory-count">
             {t(query.trim() ? "trajectoryMatches" : "trajectoryRecordCount", {
               count: filtered.length,
@@ -398,7 +631,27 @@ export const Trajectory = memo(function Trajectory({
             >
               <Info aria-hidden="true" />
             </summary>
-            <p>{t("trajectoryScope")}</p>
+            <div className="trajectory-scope-popover">
+              <p>{t("trajectoryScope")}</p>
+              <dl aria-label={t("trajectoryMetrics")}>
+                <div>
+                  <dt>{t("trajectoryModelResponses")}</dt>
+                  <dd>
+                    {t("trajectoryRequestCount", { count: requests.length })}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t("trajectoryToolCalls")}</dt>
+                  <dd>{t("trajectoryToolCount", { count: tools.length })}</dd>
+                </div>
+                {latestTiming && (
+                  <div>
+                    <dt>{t("trajectoryLastTurn")}</dt>
+                    <dd>{trajectoryDuration(latestTiming.elapsedMs)}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
           </details>
         </div>
         <label className="trajectory-search">
@@ -412,6 +665,27 @@ export const Trajectory = memo(function Trajectory({
           />
         </label>
       </header>
+      {nodes.length > 0 && (
+        <TrajectoryTimeline
+          nodes={visible}
+          selectedKey={selected?.key}
+          range={range}
+          onRange={(range) =>
+            setRange(
+              range
+                ? { ...range, keys: visible.map((node) => node.key) }
+                : null,
+            )
+          }
+          onSelect={(key) => {
+            requestedScroll.current = true;
+            select(key);
+            setInspectorClosed(false);
+            collapse(new Set());
+            foldCalls(false);
+          }}
+        />
+      )}
       {running && (
         <p className="trajectory-live" role="status">
           {t("trajectoryRunning")}
@@ -432,8 +706,59 @@ export const Trajectory = memo(function Trajectory({
           <p>{t(query.trim() ? "trajectoryNoMatches" : "trajectoryEmpty")}</p>
         </div>
       ) : (
-        <div className="trajectory-body">
-          <div className="trajectory-ledger" ref={ledger}>
+        <div
+          className="trajectory-body"
+          data-inspector-open={(selected && !inspectorClosed) || undefined}
+        >
+          <div
+            className="trajectory-ledger"
+            data-range={Boolean(range) || undefined}
+            ref={ledger}
+            onScroll={(event) => {
+              const element = event.currentTarget;
+              following.current =
+                element.scrollHeight -
+                  element.scrollTop -
+                  element.clientHeight <
+                40;
+            }}
+          >
+            {start + limit < filtered.length && (
+              <button
+                type="button"
+                className="trajectory-load"
+                onClick={() => {
+                  requestedScroll.current = true;
+                  select(null);
+                  setInspectorClosed(false);
+                  setLimit(50);
+                }}
+              >
+                {t("trajectoryLatestRecords")}
+              </button>
+            )}
+            {history.hasMore && (
+              <button
+                type="button"
+                className="trajectory-load"
+                disabled={history.loading || history.verifying}
+                onClick={() => {
+                  void history.loadOlder();
+                  setLimit((value) => value + 50);
+                }}
+              >
+                {t(
+                  history.loading
+                    ? "trajectoryHistoryLoading"
+                    : "trajectoryLoadHistory",
+                )}
+              </button>
+            )}
+            {history.error && (
+              <p className="trajectory-warning" role="alert">
+                {t(history.error)}
+              </p>
+            )}
             {start > 0 && (
               <button
                 type="button"
@@ -443,7 +768,7 @@ export const Trajectory = memo(function Trajectory({
                 {t("trajectoryEarlier", { count: start })}
               </button>
             )}
-            {groups.map((group) => {
+            {groups.map((group, groupIndex) => {
               const open = !collapsed.has(group.key);
               return (
                 <section className="trajectory-group" key={group.key}>
@@ -461,16 +786,21 @@ export const Trajectory = memo(function Trajectory({
                     }
                   >
                     <ChevronRight aria-hidden="true" />
-                    <span>
-                      {group.prompt
-                        ? open && !query.trim()
-                          ? t("trajectoryConversationGroup")
-                          : compactSummary(
-                              group.prompt.message?.content ||
-                                t("trajectory_user"),
-                              80,
-                            )
-                        : t("trajectoryEarlierGroup")}
+                    <span className="trajectory-group-label">
+                      <span className="trajectory-turn-number">
+                        {t("trajectoryTurn", { number: groupIndex + 1 })}
+                      </span>
+                      <span className="trajectory-group-name">
+                        {group.prompt
+                          ? open && !query.trim()
+                            ? t("trajectoryConversationGroup")
+                            : compactSummary(
+                                group.prompt.message?.content ||
+                                  t("trajectory_user"),
+                                80,
+                              )
+                          : t("trajectoryEarlierGroup")}
+                      </span>
                     </span>
                   </button>
                   {open && (
@@ -510,11 +840,12 @@ export const Trajectory = memo(function Trajectory({
               );
             })}
           </div>
-          {selected && (
+          {selected && !inspectorClosed && (
             <Inspector
               key={selected.key}
               node={selected}
               number={numbers.get(selected.key)!}
+              onClose={() => setInspectorClosed(true)}
             />
           )}
         </div>

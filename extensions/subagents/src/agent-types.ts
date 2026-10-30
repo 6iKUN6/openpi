@@ -21,6 +21,7 @@
  */
 
 import * as fs from "node:fs";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import {
@@ -30,6 +31,7 @@ import {
 import {
   CHILD_EXCLUDED_TOOL_NAMES,
   CHILD_SAFE_PACKAGE_TOOL_NAMES,
+  RETIRED_OPENPI_TOOL_NAMES,
 } from "../../shared/child-session.ts";
 import {
   isSubagentRoleName,
@@ -108,8 +110,6 @@ export const READ_ONLY_AGENT_TOOLS = [
   "grep",
   "find",
   "ls",
-  "fd",
-  "rg",
   "git_show",
   "git_diff",
   "git_log",
@@ -220,11 +220,14 @@ export function roleModelForAgentType(
     : undefined;
 }
 
-export interface AgentTypeDiagnostic {
-  /** File the problem came from, or the directory for a scan failure. */
+export type AgentTypeDiagnostic = {
+  /** File the diagnostic came from, or the directory for a scan failure. */
   readonly source: string;
   readonly message: string;
-}
+} & (
+  | { readonly kind: "override"; readonly name: string }
+  | { readonly kind?: undefined }
+);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -356,6 +359,13 @@ export function parseAgentType(
       diagnostics.push({
         source,
         message: `"${tool}" in ${name} is a parent-only tool; the child cannot receive it, so it is ignored`,
+      });
+      continue;
+    }
+    if (RETIRED_OPENPI_TOOL_NAMES.has(tool)) {
+      diagnostics.push({
+        source,
+        message: `"${tool}" in ${name} is no longer provided by OpenPI and is ignored`,
       });
       continue;
     }
@@ -493,8 +503,8 @@ export interface LoadAgentTypesOptions {
 
 /**
  * Load built-in then global then project agent types. Each more-specific layer
- * overrides a complete same-name definition, and every replacement is reported
- * so a role never changes meaning silently.
+ * overrides a complete same-name definition. Report the effective overrides
+ * without suggesting that superseded or rejected definitions remain active.
  */
 export function loadAgentTypes(options: LoadAgentTypesOptions) {
   const global = loadDirectory(
@@ -529,6 +539,8 @@ export function loadAgentTypes(options: LoadAgentTypesOptions) {
       const shadowed = agentTypes.get(agentType.name);
       if (shadowed) {
         diagnostics.push({
+          kind: "override",
+          name: agentType.name,
           source: agentType.source,
           message: `overrides the agent type of the same name from ${shadowed.source}`,
         });
@@ -537,18 +549,69 @@ export function loadAgentTypes(options: LoadAgentTypesOptions) {
     }
   }
 
-  return { agentTypes, diagnostics };
+  return {
+    agentTypes,
+    diagnostics: diagnostics.filter(
+      (entry) =>
+        entry.kind !== "override" ||
+        agentTypes.get(entry.name)?.source === entry.source,
+    ),
+  };
 }
 
-/** One-line-per-problem notice, or undefined when everything loaded cleanly. */
-export function formatAgentTypeDiagnostics(
+/** Normal overrides are provenance, not problems. Keep real warnings separate. */
+export function formatAgentTypeNotices(
   diagnostics: readonly AgentTypeDiagnostic[],
+  home = homedir(),
 ) {
-  if (diagnostics.length === 0) return undefined;
-  return sanitizeTerminalText(
-    [
-      `Agent types: ${diagnostics.length} problem${diagnostics.length === 1 ? "" : "s"}.`,
-      ...diagnostics.map((entry) => `- ${entry.source}: ${entry.message}`),
-    ].join("\n"),
-  );
+  const shortSource = (source: string) => {
+    const relative = path.relative(home, source);
+    const display =
+      path.isAbsolute(source) &&
+      !path.isAbsolute(relative) &&
+      relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`)
+        ? relative
+          ? `~/${relative.split(path.sep).join("/")}`
+          : "~"
+        : source;
+    return sanitizeTerminalText(display);
+  };
+  const warnings = diagnostics.filter((entry) => entry.kind !== "override");
+  // Keep this projection compact even if callers supply a replacement chain.
+  const overrides = new Map<string, string>();
+  for (const entry of diagnostics) {
+    if (entry.kind === "override")
+      overrides.set(
+        sanitizeTerminalText(entry.name),
+        shortSource(entry.source),
+      );
+  }
+  const notices: { level: "info" | "warning"; message: string }[] = [];
+  if (warnings.length) {
+    notices.push({
+      level: "warning",
+      message: sanitizeTerminalText(
+        [
+          `Agent roles · ${warnings.length} warning${warnings.length === 1 ? "" : "s"}`,
+          ...warnings.map(
+            (entry) => `  ${shortSource(entry.source)}\n    ${entry.message}`,
+          ),
+        ].join("\n"),
+      ),
+    });
+  }
+  if (overrides.size) {
+    const width = Math.max(...[...overrides.keys()].map((name) => name.length));
+    notices.push({
+      level: "info",
+      message: [
+        `Agent roles · ${overrides.size} custom override${overrides.size === 1 ? "" : "s"}`,
+        ...[...overrides].map(
+          ([name, source]) => `  ${name.padEnd(width)}  ← ${source}`,
+        ),
+      ].join("\n"),
+    });
+  }
+  return notices;
 }

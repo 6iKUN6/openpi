@@ -16,6 +16,7 @@ import type {
   WebMessagePart,
   WebSnapshot,
 } from "../../web/protocol/types.ts";
+import { projectMessage } from "../../web/protocol/types.ts";
 import { Transcript } from "../../web/ui/src/features/transcript/Transcript.tsx";
 import { i18n } from "../../web/ui/src/i18n.ts";
 import { WebClient } from "../../web/ui/src/protocol/client.ts";
@@ -138,7 +139,511 @@ function view(value: WebSnapshot, activityObserved = true) {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+it("renders persisted Code Mode children as ordinary tools and preserves script evidence", () => {
+  const tool = {
+    ...call,
+    id: "code",
+    name: "codemode",
+    arguments: '{"code":"await tools.read({path:\"file.ts\"})"}',
+  };
+  const result = projectMessage({
+    role: "toolResult",
+    toolName: "codemode",
+    toolCallId: tool.id,
+    isError: false,
+    content: "script output",
+    nestedCalls: {
+      complete: true,
+      calls: [
+        {
+          id: "code/1",
+          name: "read",
+          arguments: { path: "file.ts" },
+          status: "ok",
+        },
+        {
+          id: "code/2",
+          name: "bash",
+          arguments: { command: "bun run check" },
+          status: "ok",
+        },
+        {
+          id: "code/3",
+          name: "edit",
+          arguments: { path: "styles.css" },
+          status: "error",
+          error: "Missing text",
+        },
+      ],
+    },
+  });
+  const { container, getByText } = render(
+    view(snapshot({ tool, results: [result] })),
+  );
+  expect(
+    [...container.querySelectorAll("details[data-tool]")].map((element) =>
+      element.getAttribute("data-tool"),
+    ),
+  ).toEqual(["read", "bash", "edit"]);
+  expect(
+    container.querySelector('[data-tool="read"] .lucide-book-open'),
+  ).toBeTruthy();
+  expect(
+    container.querySelector('[data-tool="bash"] .tool-summary')?.textContent,
+  ).toContain("bun run check");
+  expect(
+    container.querySelector('[data-tool="edit"]')?.classList.contains("error"),
+  ).toBe(true);
+  expect(container.querySelectorAll(".evidence-note")).toHaveLength(3);
+  expect(getByText(i18n.t("toolCodemodeDetails"))).toBeTruthy();
+  expect(getByText("script output")).toBeTruthy();
+  expect(container.querySelector(".evidence-diff")).toBeNull();
+});
+
+it("keeps ledger-only model failures inspectable alongside normal Code Mode tools", () => {
+  const tool = { ...call, id: "code", name: "codemode" };
+  const result = projectMessage({
+    role: "toolResult",
+    toolName: "codemode",
+    toolCallId: tool.id,
+    isError: false,
+    content: "script handled model failure",
+    nestedCalls: {
+      complete: true,
+      calls: [
+        {
+          id: "code/1",
+          name: "read",
+          arguments: { path: "file.ts" },
+          status: "ok",
+        },
+      ],
+    },
+    details: {
+      calls: [
+        { id: "code/1", name: "read", status: "ok" },
+        {
+          id: "code/models.classify/1",
+          name: "models.classify",
+          status: "error",
+          error: "provider failed",
+        },
+      ],
+    },
+  });
+  const { container, getByText } = render(
+    view(snapshot({ tool, results: [result] })),
+  );
+  expect(container.querySelector('[data-tool="read"]')).toBeTruthy();
+  const carrier = container.querySelector('[data-tool="codemode"]');
+  expect(carrier).toBeTruthy();
+  expect(carrier?.querySelector(".evidence-raw pre")?.textContent).toContain(
+    "provider failed",
+  );
+  expect(getByText(i18n.t("toolNestedIncomplete"))).toBeTruthy();
+});
+
+it("renders real nested live results without duplicating the carrier and settles from persisted facts", () => {
+  const tool = {
+    ...call,
+    id: "code",
+    name: "codemode",
+    arguments: '{"code":"Promise.all"}',
+  };
+  const nested = {
+    ...call,
+    id: "code/1",
+    name: "read",
+    arguments: '{"path":"file.ts"}',
+  };
+  const liveTools: LiveToolEvidence[] = [
+    { call: tool, state: "running" },
+    {
+      call: nested,
+      parentToolCallId: "code",
+      state: "running",
+      result: { content: "streamed output" },
+    },
+  ];
+  const { container, rerender } = render(
+    view(snapshot({ tool, liveTools, running: true })),
+  );
+  expect(container.querySelector('[data-tool="codemode"]')).toBeNull();
+  expect(
+    container.querySelector('[data-tool="read"]')?.getAttribute("data-state"),
+  ).toBe("running");
+  expect(container.textContent).toContain("streamed output");
+  const result = projectMessage({
+    role: "toolResult",
+    toolName: "codemode",
+    toolCallId: tool.id,
+    isError: false,
+    content: "done",
+    nestedCalls: {
+      complete: true,
+      calls: [
+        {
+          id: nested.id,
+          name: nested.name,
+          arguments: { path: "file.ts" },
+          status: "ok",
+        },
+      ],
+    },
+  });
+  rerender(view(snapshot({ tool, results: [result], liveTools })));
+  expect(
+    container.querySelector('[data-tool="read"]')?.getAttribute("data-state"),
+  ).not.toBe("running");
+  expect(container.querySelector('[data-tool="codemode"]')).toBeNull();
+});
+
+it("keeps active native child SSE bodies when the execution snapshot only lists pending top-level calls", () => {
+  const tool = { ...call, id: "live-native-code", name: "codemode" };
+  const child = { ...call, id: "live-native-code/1", name: "read" };
+  const childResult = projectMessage({
+    role: "toolResult",
+    toolName: "read",
+    toolCallId: child.id,
+    isError: false,
+    content: [
+      { type: "text", text: "Exact live child body" },
+      { type: "image", data: "fixture", mimeType: "image/png" },
+    ],
+  });
+  const liveTools: LiveToolEvidence[] = [
+    { call: tool, state: "running" },
+    {
+      call: child,
+      parentToolCallId: tool.id,
+      state: "returned",
+      result: childResult,
+    },
+  ];
+  const state: WebSnapshot = snapshot({ tool, liveTools, running: true });
+  // getSessionExecution reconstructs pending native top-level calls, while
+  // Host runtime.liveTools carries the observed nested events and bodies.
+  state.selectedExecution = {
+    sessionId: "session",
+    sessionPath: "/session.jsonl",
+    status: "running",
+    liveTools: [{ call: tool, state: "running" }],
+    liveToolsOmitted: 0,
+  };
+  const ui = render(view(state));
+  expect(ui.container.textContent).toContain("Exact live child body");
+  expect(ui.container.textContent).not.toContain(
+    i18n.t("toolNestedOutputMissing"),
+  );
+
+  const result = projectMessage({
+    role: "toolResult",
+    toolName: "codemode",
+    toolCallId: tool.id,
+    isError: false,
+    content: "wrapper",
+    nestedCalls: {
+      complete: true,
+      calls: [{ id: child.id, name: "read", arguments: {}, status: "ok" }],
+    },
+  });
+  const settled: WebSnapshot = snapshot({ tool, results: [result], liveTools });
+  settled.selectedExecution = {
+    ...state.selectedExecution,
+    status: "idle",
+    liveTools: [],
+  };
+  ui.rerender(view(settled));
+  expect(ui.container.textContent).toContain("Exact live child body");
+  expect(ui.container.textContent).not.toContain(
+    i18n.t("toolNestedOutputMissing"),
+  );
+
+  // Another current controller (even a copied Session sharing the id) cannot
+  // supply its live body to this historical projection.
+  ui.rerender(view({ ...settled, currentSessionPath: "/other-copy.jsonl" }));
+  expect(ui.container.textContent).not.toContain("Exact live child body");
+  expect(ui.container.textContent).toContain(i18n.t("toolNestedOutputMissing"));
+  // A fresh Host/reload with no observed body remains truthfully missing.
+  ui.rerender(
+    view({ ...settled, runtime: { ...settled.runtime, liveTools: [] } }),
+  );
+  expect(ui.container.textContent).not.toContain("Exact live child body");
+  expect(ui.container.textContent).toContain(i18n.t("toolNestedOutputMissing"));
+});
+
+it("retains Code Mode wrapper failures and distinguishes cancelled child evidence after refresh", () => {
+  const tool = { ...call, id: "code", name: "codemode" };
+  const result = projectMessage({
+    role: "toolResult",
+    toolName: "codemode",
+    toolCallId: tool.id,
+    isError: true,
+    content: "Script aborted",
+    nestedCalls: {
+      complete: true,
+      calls: [
+        {
+          id: "code/1",
+          name: "bash",
+          arguments: { command: "long job" },
+          status: "error",
+        },
+      ],
+    },
+    details: { calls: [{ id: "code/1", name: "bash", status: "cancelled" }] },
+  });
+  const { container } = render(view(snapshot({ tool, results: [result] })));
+  const child = container.querySelector('[data-tool="bash"]');
+  expect(child?.classList.contains("warn")).toBe(true);
+  expect(child?.querySelector(".tool-action")?.textContent).toBe(
+    i18n.t("toolActivity_cancelled", { action: i18n.t("toolAction_command") }),
+  );
+  expect(
+    container
+      .querySelector('[data-tool="codemode"]')
+      ?.classList.contains("error"),
+  ).toBe(true);
+  expect(container.textContent).toContain("Script aborted");
+});
+
+it.each([false, true])(
+  "shows incomplete nested evidence outside the raw disclosure (wrapper failure %s)",
+  (isError) => {
+    const tool = { ...call, id: "code", name: "codemode" };
+    const result = projectMessage({
+      role: "toolResult",
+      toolName: "codemode",
+      toolCallId: tool.id,
+      isError,
+      content: "partial record",
+      nestedCalls: {
+        complete: false,
+        calls: [
+          {
+            id: "code/1",
+            name: "read",
+            arguments: { path: "file.ts" },
+            status: "unfinished",
+          },
+        ],
+      },
+    });
+    const { getByText } = render(view(snapshot({ tool, results: [result] })));
+    const notice = getByText(i18n.t("toolNestedIncomplete"));
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.closest(".evidence-raw")).toBeNull();
+    expect(notice.closest("[data-tool]")).toBeNull();
+  },
+);
+
+it.each([
+  ["bash", "lucide-square-terminal"],
+  ["read", "lucide-book-open"],
+  ["edit", "lucide-pencil"],
+])(
+  "matches a completed %s-first summary to its icon without reordering evidence",
+  (first, icon) => {
+    const tools = [
+      first,
+      ...["bash", "read", "edit"].filter((name) => name !== first),
+    ].map((name) => ({
+      ...call,
+      id: name,
+      name,
+      arguments:
+        name === "bash" ? call.arguments : '{"path":"/workspace/a.ts"}',
+    }));
+    const value = snapshot({
+      results: tools.map((tool) => ({
+        role: "toolResult",
+        toolName: tool.name,
+        toolCallId: tool.id,
+        content: "Exact receipt",
+        isError: false,
+      })),
+    });
+    value.selectedSession.entries[1]!.message!.parts = tools;
+    const { container } = render(view(value));
+    const sequence =
+      container.querySelector<HTMLDetailsElement>(".process-sequence")!;
+    expect(sequence.open).toBe(false);
+    expect(sequence.querySelector(`:scope > summary .${icon}`)).toBeTruthy();
+    expect(sequence.querySelector(".process-sequence-title")?.textContent).toBe(
+      i18n.t("toolGroup_done", {
+        actions: tools
+          .map((tool) =>
+            i18n.t(
+              `toolActionGroup_${tool.name === "bash" ? "command" : tool.name}`,
+            ),
+          )
+          .join(i18n.t("toolGroupSeparator")),
+      }),
+    );
+    expect(
+      Array.from(sequence.querySelectorAll(".tool-evidence-card"), (card) =>
+        card.getAttribute("data-tool"),
+      ),
+    ).toEqual(tools.map((tool) => tool.name));
+    expect(
+      sequence.querySelector(".tool-evidence-card > summary .tool-name"),
+    ).toBeNull();
+    expect(
+      sequence.querySelector(
+        '.tool-evidence-card[data-tool="read"] .evidence-content details code',
+      )?.textContent,
+    ).toBe("read");
+  },
+);
+
+it("shows the current tool until all calls return, even while the parent keeps working", () => {
+  vi.useFakeTimers();
+  const reader = {
+    ...call,
+    id: "reader",
+    name: "read",
+    arguments: '{"path":"/workspace/a.ts"}',
+  };
+  const editor = { ...reader, id: "editor", name: "edit" };
+  const calls = [call, reader, editor];
+  const frame = (
+    active: number | undefined,
+    running = active !== undefined,
+  ) => {
+    const value = snapshot({
+      running,
+      liveTools: calls.map((tool, index) => ({
+        call: tool,
+        state: active === index ? "running" : "returned",
+        result: {
+          role: "toolResult",
+          toolName: tool.name,
+          toolCallId: tool.id,
+          content: "Exact receipt",
+          isError: false,
+        },
+      })),
+    });
+    value.selectedSession.entries[1]!.message!.parts = calls;
+    return view(value);
+  };
+  const rendered = render(frame(0));
+  const sequence =
+    rendered.container.querySelector<HTMLDetailsElement>(".process-sequence")!;
+  const title = () =>
+    sequence.querySelector(".process-sequence-title")?.textContent;
+  expect(sequence.open).toBe(false);
+  act(() => vi.advanceTimersByTime(100));
+  rendered.rerender(frame(1));
+  expect(title()).toBe(
+    i18n.t("toolActivity_running", { action: i18n.t("toolAction_read") }),
+  );
+  act(() => vi.advanceTimersByTime(100));
+  rendered.rerender(frame(2));
+  expect(title()).toBe(
+    i18n.t("toolActivity_running", { action: i18n.t("toolAction_edit") }),
+  );
+  expect(
+    sequence.querySelector(":scope > summary .lucide-pencil"),
+  ).toBeTruthy();
+  expect(
+    sequence
+      .querySelector('.tool-evidence-card[data-tool="edit"]')
+      ?.getAttribute("data-state"),
+  ).toBe("running");
+  act(() => vi.advanceTimersByTime(800));
+  expect(title()).toBe(
+    i18n.t("toolActivity_running", { action: i18n.t("toolAction_edit") }),
+  );
+  expect(
+    sequence.querySelector(":scope > summary .lucide-pencil"),
+  ).toBeTruthy();
+  editor.arguments = '{"path":"/workspace/b.ts"}';
+  rendered.rerender(frame(2));
+  expect(sequence.querySelector(".process-sequence-preview")?.textContent).toBe(
+    "b.ts",
+  );
+  rendered.rerender(frame(1));
+  rendered.rerender(frame(undefined, true));
+  expect(sequence.getAttribute("data-status")).toBe("done");
+  expect(title()).not.toBe(i18n.t("processRunning"));
+  expect(sequence.querySelector(".process-sequence-preview")).toBeNull();
+  rendered.rerender(frame(undefined));
+  expect(sequence.open).toBe(false);
+  expect(sequence.getAttribute("data-status")).toBe("done");
+  expect(title()).not.toContain(
+    i18n.t("toolActivity_running", { action: i18n.t("toolAction_edit") }),
+  );
+  const settled = title();
+  act(() => vi.advanceTimersByTime(1000));
+  expect(title()).toBe(settled);
+  act(() => {
+    sequence.open = true;
+    fireEvent(sequence, new Event("toggle"));
+  });
+  expect(title()).toBe(i18n.t("processDetails"));
+  act(() => {
+    sequence.open = false;
+    fireEvent(sequence, new Event("toggle"));
+  });
+  expect(title()).toBe(settled);
+});
+
+it("labels reading, searching, listing, editing, writing, browsing and commands consistently", () => {
+  const tools = [
+    "read",
+    "grep",
+    "ls",
+    "edit",
+    "write",
+    "web_search",
+    "bash",
+  ].map((name) => ({
+    ...call,
+    id: name,
+    name,
+    arguments:
+      '{"path":"/workspace/a.ts","query":"reference","command":"rg needle ."}',
+  }));
+  const value = snapshot({
+    results: tools.map((tool) => ({
+      role: "toolResult",
+      toolName: tool.name,
+      toolCallId: tool.id,
+      content: "Exact receipt",
+      isError: false,
+    })),
+  });
+  value.selectedSession.entries[1]!.message!.parts = tools;
+  const { container } = render(view(value));
+  expect(
+    container.querySelectorAll(".process-sequence-body .tool-kind"),
+  ).toHaveLength(0);
+  const summaries = Array.from(
+    container.querySelectorAll("[data-tool] > summary"),
+  );
+  expect(
+    summaries.map(
+      (summary) => summary.querySelector(".tool-action")?.textContent,
+    ),
+  ).toEqual(
+    ["read", "search", "list", "edit", "write", "web", "command"].map(
+      (action) => i18n.t(`toolActionDone_${action}`),
+    ),
+  );
+  // A shell command remains a command, even when its contents invoke rg.
+  expect(summaries.at(-1)?.querySelector(".tool-action")?.textContent).toBe(
+    i18n.t("toolActionDone_command"),
+  );
+  expect(
+    summaries.map((summary) =>
+      summary.parentElement?.getAttribute("data-tool"),
+    ),
+  ).toEqual(tools.map((tool) => tool.name));
 });
 
 it("expands Bash and file evidence from canonical display preferences without changing results or their state", () => {
@@ -393,7 +898,11 @@ it("shows the actual running tool in a folded group and follows new rows only wh
   const scroller = rendered.container.querySelector<HTMLDivElement>(
     ".process-sequence-scroll",
   )!;
-  expect(sequence.open).toBe(true);
+  expect(sequence.open).toBe(false);
+  await act(async () => {
+    sequence.open = true;
+    fireEvent(sequence, new Event("toggle"));
+  });
   expect(sequence.querySelector("summary")?.textContent).toContain(
     "file-10.ts",
   );
@@ -517,12 +1026,12 @@ it("keeps interleaved reasoning and tools in chronological groups separated by p
       thinking.classList.contains("running") ? "running" : "done",
     ),
   ).toEqual(["done", "done", "done", "running"]);
-  expect(sequences[0]!.querySelector("summary")?.textContent).toContain(
-    i18n.t("processThinkingCount", { count: 2 }),
-  );
-  expect(sequences[0]!.querySelector("summary")?.textContent).toContain(
-    i18n.t("processToolCount", { count: 2 }),
-  );
+  expect(
+    sequences[0]!.querySelector("summary")?.getAttribute("aria-label"),
+  ).toContain(i18n.t("processThinkingCount", { count: 2 }));
+  expect(
+    sequences[0]!.querySelector("summary")?.getAttribute("aria-label"),
+  ).toContain(i18n.t("processToolCount", { count: 2 }));
   expect(
     Array.from(container.querySelectorAll(".tool-evidence-card"), (card) =>
       card.getAttribute("data-state"),
@@ -560,7 +1069,7 @@ it("keeps default thinking folded as it streams and preserves an explicit expans
   expect(disclosure.open).toBe(true);
 });
 
-it("connects tools only to preceding thinking in the same native assistant message", () => {
+it("keeps reasoning and tools in native order without nested indentation", () => {
   const value: WebSnapshot = snapshot();
   value.selectedSession!.entries[1]!.message!.parts = [
     { type: "thinking", text: "Inspect the source first" },
@@ -602,13 +1111,13 @@ it("connects tools only to preceding thinking in the same native assistant messa
     })),
   ).toEqual([
     { text: "Inspect the source first", tool: undefined, connected: false },
-    { text: undefined, tool: "bash", connected: true },
+    { text: undefined, tool: "bash", connected: false },
     {
       text: "Then inspect the settings",
       tool: undefined,
       connected: false,
     },
-    { text: undefined, tool: "read", connected: true },
+    { text: undefined, tool: "read", connected: false },
     { text: undefined, tool: "ls", connected: false },
     {
       text: "An independent reasoning note",
@@ -788,7 +1297,7 @@ it.each([
   },
 );
 
-it("retains an earlier phase's exact running tool status while only the current phase opens and follows", () => {
+it("retains every phase's exact running tool status while summaries stay collapsed", () => {
   const second = { ...call, id: "current-tool" };
   const value: WebSnapshot = snapshot({
     running: true,
@@ -813,7 +1322,7 @@ it("retains an earlier phase's exact running tool status while only the current 
   );
   expect(sequences).toHaveLength(2);
   expect(sequences[0]!.open).toBe(false);
-  expect(sequences[1]!.open).toBe(true);
+  expect(sequences[1]!.open).toBe(false);
   expect(sequences[0]!.getAttribute("data-status")).toBe("running");
   expect(
     sequences[0]!
@@ -834,7 +1343,7 @@ it("retains an earlier phase's exact running tool status while only the current 
   height = 1100;
   rendered.rerender(view({ ...value, generatedAt: "2026-09-26T10:00:05Z" }));
   expect(scrollers[0]!.scrollTop).toBe(100);
-  expect(scrollers[1]!.scrollTop).toBe(height);
+  expect(scrollers[1]!.scrollTop).toBe(0);
   expect(
     Array.from(
       rendered.container.querySelectorAll(".tool-evidence-card"),
@@ -870,6 +1379,14 @@ it.each(["wheel", "ArrowUp", "PageUp", "Home", "Shift+Space"])(
       return view(value);
     };
     const rendered = render(stream("First live output"));
+    const sequence =
+      rendered.container.querySelector<HTMLDetailsElement>(
+        ".process-sequence",
+      )!;
+    act(() => {
+      sequence.open = true;
+      fireEvent(sequence, new Event("toggle"));
+    });
     const scroller = rendered.container.querySelector<HTMLElement>(
       ".process-sequence-scroll",
     )!;
@@ -947,6 +1464,11 @@ it("follows resize-only process growth at the bottom while preserving an upward 
     const scroller = rendered.container.querySelector<HTMLElement>(
       ".process-sequence-scroll",
     )!;
+    const sequence = scroller.closest<HTMLDetailsElement>(".process-sequence")!;
+    act(() => {
+      sequence.open = true;
+      fireEvent(sequence, new Event("toggle"));
+    });
     const body = scroller.querySelector<HTMLElement>(".process-sequence-body")!;
     let height = 900;
     let top = 0;
@@ -1232,6 +1754,47 @@ it("keeps family activity status aligned with the exact live tool execution", ()
   ).toBe(i18n.t("toolState_running"));
 });
 
+it.each(["subagent_send", "subagent_check", "bash"])(
+  "settles a returned %s receipt independently of the background task, including history without the call",
+  (name) => {
+    const tool = { ...call, name, arguments: '{"id":"sa-1"}' };
+    const receipt = {
+      role: "toolResult",
+      toolName: name,
+      toolCallId: tool.id,
+      content: "The operation returned; background work continues.",
+      isError: false,
+      details: { id: "sa-1", status: "running" },
+    } satisfies WebLiveMessage;
+    const value = snapshot({
+      tool,
+      running: true,
+      liveTools: [{ call: tool, result: receipt, state: "running" }],
+    });
+    const rendered = render(view(value));
+    const status = () =>
+      rendered.container
+        .querySelector(".process-step")
+        ?.getAttribute("data-status");
+    // An intermediate update containing a result is not an execution-end event.
+    expect(status()).toBe("running");
+    value.runtime.liveTools = [
+      { call: tool, result: receipt, state: "returned" },
+    ];
+    rendered.rerender(view({ ...value }));
+    expect(status()).toBe("done");
+    expect(
+      rendered.container.querySelector(".process-sequence.running"),
+    ).toBeNull();
+    const saved = snapshot({ tool, results: [receipt], running: true });
+    rendered.rerender(view(saved));
+    expect(status()).toBe("done");
+    saved.selectedSession.entries.splice(1, 1);
+    rendered.rerender(view({ ...saved }));
+    expect(status()).toBe("done");
+  },
+);
+
 it("does not borrow a later turn's execution state for an earlier unmatched tool", () => {
   const current = { ...call, id: "current-tool" };
   const value = snapshot({
@@ -1302,15 +1865,16 @@ it("does not summarize a mixed returned and unmatched sequence as completed", ()
 it("retains a known process failure in a single tool while the native status-query receipt succeeded", () => {
   const tool = {
     ...call,
-    name: "bg_status",
-    arguments: '{"id":"background-terminal"}',
+    name: "bash",
+    arguments: '{"command":"run-server"}',
   };
   const receipt = {
     role: "toolResult",
-    toolName: "bg_status",
+    toolName: "bash",
     toolCallId: tool.id,
     content: "Background process failed with exit code 2",
     isError: false,
+    terminalReceipt: { state: "failed" as const, exitCode: 2 },
     details: { status: "failed", exitCode: 2 },
   } satisfies WebLiveMessage;
   const { container } = render(view(snapshot({ tool, results: [receipt] })));
@@ -1388,18 +1952,19 @@ it.each([false, true])(
 it("keeps known process failure ahead of an unmatched step in the group summary", () => {
   const tool = {
     ...call,
-    name: "bg_status",
-    arguments: '{"id":"background-terminal"}',
+    name: "bash",
+    arguments: '{"command":"run-server"}',
   };
   const value = snapshot({
     tool,
     results: [
       {
         role: "toolResult",
-        toolName: "bg_status",
+        toolName: "bash",
         toolCallId: tool.id,
         content: "Background process failed",
         isError: false,
+        terminalReceipt: { state: "failed" as const, exitCode: 2 },
         details: { status: "failed", exitCode: 2 },
       },
     ],
@@ -1455,8 +2020,11 @@ it.each([
         .querySelector(".tool-evidence-card")
         ?.getAttribute("data-state"),
     ).toBe(state);
-    expect(container.querySelector(".evidence-shell pre")?.textContent).toBe(
-      `$ build\n\n${content}`,
+    expect(
+      container.querySelector(".evidence-shell-command")?.textContent,
+    ).toBe("$ build");
+    expect(container.querySelector(".evidence-shell-output")?.textContent).toBe(
+      content,
     );
     expect(container.querySelector(".process-step.running")).toBeNull();
   },

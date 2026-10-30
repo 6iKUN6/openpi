@@ -249,7 +249,10 @@ test("real file evidence, authenticated downloads, edits, refresh and failure st
       .getByRole("button", { name: /打开工具|Open tools/u, exact: true })
       .click();
     const workbar = page.locator(".workbar-panel");
-    await workbar.getByRole("button", { name: /^(文件|Files)/u }).click();
+    await page
+      .getByRole("menu", { name: /打开工具|Open tools/u })
+      .getByRole("menuitem", { name: /^(文件|Files)/u })
+      .click();
     const generatedReport = workbar.locator(
       '[data-file-row="report space.md"]',
     );
@@ -265,20 +268,16 @@ test("real file evidence, authenticated downloads, edits, refresh and failure st
     await expect(page.locator(".session-changes-trigger")).toHaveCount(0);
     for (const group of await page.locator(".process-sequence").all())
       if ((await group.getAttribute("open")) === null)
-        await group.locator(":scope > summary").press("Enter");
+        await group.locator(":scope > summary").click();
     for (const card of await page.locator(".tool-evidence-card").all())
       if ((await card.getAttribute("open")) === null)
-        await card.locator(":scope > summary").press("Enter");
-    const readCard = page
-      .locator(".tool-evidence-card")
-      .filter({ has: page.locator("summary strong", { hasText: "read" }) });
+        await card.locator(":scope > summary").click();
+    const readCard = page.locator('.tool-evidence-card[data-tool="read"]');
     const toolTitleColors = await readCard
       .locator(":scope > summary")
       .evaluate((summary) => {
-        const label = summary.querySelector<HTMLElement>(".tool-name");
-        const detail = summary.querySelector<HTMLElement>(
-          ":scope > span:not(.evidence-status):not(.evidence-summary-meta)",
-        );
+        const label = summary.querySelector<HTMLElement>(".tool-kind");
+        const detail = summary.querySelector<HTMLElement>(".evidence-filename");
         return {
           label: label ? getComputedStyle(label).color : "",
           detail: detail ? getComputedStyle(detail).color : "",
@@ -297,13 +296,10 @@ test("real file evidence, authenticated downloads, edits, refresh and failure st
     ).toContainText("Initial content");
     await expect(
       page
-        .locator(".tool-evidence-card")
-        .filter({ has: page.locator("summary strong", { hasText: "edit" }) })
+        .locator('.tool-evidence-card[data-tool="edit"]')
         .getByRole("figure", { name: "Change diff" }),
     ).toContainText("Reviewed content");
-    const writeCard = page
-      .locator(".tool-evidence-card")
-      .filter({ has: page.locator("summary strong", { hasText: "write" }) });
+    const writeCard = page.locator('.tool-evidence-card[data-tool="write"]');
     await expect(writeCard).toContainText(
       "reading the previous contents was not authorized",
     );

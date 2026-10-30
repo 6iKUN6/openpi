@@ -5,11 +5,9 @@ import {
   Folder,
   GitBranch,
   Globe,
-  ListChecks,
   Pencil,
   Search,
   SquareTerminal,
-  Target,
   Workflow,
   Wrench,
 } from "lucide-react";
@@ -42,21 +40,11 @@ export function toolActivity(name: string) {
       return { action: "web", Icon: Globe };
     case "plan_ready":
       return { action: "plan", Icon: ClipboardList };
-    case "tasks_add":
-    case "tasks_update":
-    case "tasks_list":
-      return { action: "task", Icon: ListChecks };
-    case "get_goal":
-    case "create_goal":
-    case "update_goal":
-      return { action: "goal", Icon: Target };
     case "git_show":
     case "git_diff":
     case "git_log":
       return { action: "git", Icon: GitBranch };
     default:
-      if (name.startsWith("bg_"))
-        return { action: "command", Icon: SquareTerminal };
       if (name.startsWith("subagent")) return { action: "agent", Icon: Bot };
       if (name.startsWith("workflow"))
         return { action: "workflow", Icon: Workflow };
@@ -66,13 +54,30 @@ export function toolActivity(name: string) {
 
 export function toolActivityLabel(t: TFunction, name: string, state: string) {
   const { action } = toolActivity(name);
+  const operation = name.replace(/^subagent_/u, "");
+  const subagent =
+    action === "agent" &&
+    ["spawn", "send", "check", "wait", "cancel"].includes(operation);
+  if (subagent && state === "returned")
+    return t(`subagentActionDone_${operation}`);
   if (state === "returned") return t(`toolActionDone_${action}`);
   const labelState = ["running", "failed", "cancelled", "timed_out"].includes(
     state,
   )
     ? state
     : "unknown";
-  return t(`toolActivity_${labelState}`, { action: t(`toolAction_${action}`) });
+  return t(`toolActivity_${labelState}`, {
+    action: t(
+      subagent ? `subagentAction_${operation}` : `toolAction_${action}`,
+    ),
+  });
+}
+
+export function toolActivityTag(name: string) {
+  const { action } = toolActivity(name);
+  if (action === "command") return "run";
+  if (action === "workflow") return "flow";
+  return action === "call" ? name : action;
 }
 
 export function toolActivityTarget(

@@ -7,17 +7,18 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime, Stream } from "effect";
 import {
   BackendRegistry,
   type SubagentBackend,
 } from "../../../extensions/subagents/src/backend.ts";
-import { makeStubBackend } from "../../support/subagents-stub.ts";
+import { makeStubBackend, stubSpend } from "../../support/subagents-stub.ts";
 import type {
   BackendName,
   ParentContext,
   SpawnTask,
   SubagentStatus,
+  SubagentEvent,
 } from "../../../extensions/subagents/src/domain.ts";
 import {
   makeSubagentManagerLayer,
@@ -30,6 +31,7 @@ import {
 import { runTool } from "../../../extensions/subagents/src/runtime.ts";
 import { ChildExecutionAdmission } from "../../../extensions/shared/child-execution-admission.ts";
 import { subagentCompletion } from "../../../extensions/subagents/src/completion.ts";
+import { AgentToolRenderLedger } from "../../../extensions/shared/agent-tool-renderer.ts";
 
 const STATUS_WAIT_TIMEOUT_MS = 5_000;
 
@@ -101,6 +103,76 @@ function waitForManagerStatus(
 
 const isSettledStatus = (status: SubagentStatus | undefined) =>
   status === "done" || status === "error";
+
+test("direct transcript eviction releases completed native tool payloads", async () => {
+  const ledger = new AgentToolRenderLedger();
+  const events: SubagentEvent[] = [{ _tag: "RunStarted" }];
+  for (let index = 0; index < 600; index++) {
+    events.push({
+      _tag: "ToolStart",
+      toolId: `tool-${index}`,
+      name: "fixture",
+    });
+    events.push({
+      _tag: "ToolEnd",
+      toolId: `tool-${index}`,
+      name: "fixture",
+      isError: false,
+      outputPreview: "saved",
+    });
+  }
+  events.push({
+    _tag: "RunSettled",
+    outcome: { _tag: "Completed", finalText: "done" },
+  });
+  const backend: SubagentBackend = {
+    name: "pi",
+    spawn: () =>
+      Effect.succeed({
+        meta: Effect.succeed({ backend: "pi", modelLabel: "fixture" }),
+        events: Stream.fromIterable(events).pipe(
+          Stream.map((event) => {
+            if (event._tag === "ToolStart")
+              ledger.start(event.toolId, event.name, {});
+            if (event._tag === "ToolEnd")
+              ledger.end(
+                event.toolId,
+                event.name,
+                { content: [{ type: "text", text: "saved" }] },
+                false,
+              );
+            return event;
+          }),
+        ),
+        send: () => Effect.void,
+        interrupt: Effect.void,
+        toolRenderer: ledger,
+      }),
+  };
+  await withManager(
+    async (manager, runtime) => {
+      const spawned = await runTool(
+        runtime,
+        manager.spawn("pi", task("retention")),
+      );
+      await runTool(runtime, manager.waitFor([spawned.id]));
+      assert.equal(manager.view.get(spawned.id)?.transcript.length, 512);
+      assert.equal(
+        ledger.renderTool({ toolId: "tool-0", name: "fixture" }, 80),
+        undefined,
+      );
+      // A retained result still has its native definition/result record, rather
+      // than falling back to a truncated transcript-only rendering.
+      assert.notEqual(
+        Reflect.get(ledger, "executions").get("tool-599"),
+        undefined,
+      );
+      assert.equal(Reflect.get(ledger, "executions").size, 512);
+    },
+    undefined,
+    [backend],
+  );
+});
 
 const stubBackend = () =>
   makeStubBackend({
@@ -393,7 +465,22 @@ test("stub subagent completes and delivers a final result", async () => {
     assert.equal(snap.backend, "pi");
     assert.ok(snap.meta.sessionFilePath);
 
-    await runTool(runtime, manager.waitFor([snap.id]));
+    const pendingUpdates: string[][] = [];
+    let liveUpdates = 0;
+    const unsubscribe = manager.view.subscribeTo(snap.id, () => liveUpdates++);
+    try {
+      await runTool(
+        runtime,
+        manager.waitFor([snap.id], (pending) => pendingUpdates.push(pending)),
+      );
+    } finally {
+      unsubscribe();
+    }
+    assert.deepEqual(pendingUpdates, [[snap.id]]);
+    assert.ok(
+      liveUpdates > 1,
+      "live progress subscribers still receive streaming events",
+    );
     const done = manager.view.get(snap.id);
     assert.ok(done);
     assert.equal(done.status, "done");
@@ -406,6 +493,29 @@ test("stub subagent completes and delivers a final result", async () => {
     assert.ok(done.transcript.some((item) => item.kind === "toolResult"));
     // The waitFor marked the settle as consumed.
     assert.deepEqual(settled, [{ id: snap.id, consumed: true }]);
+  });
+});
+
+test("usage events fold cumulative spend onto the snapshot", async () => {
+  await withManager(async (manager, runtime) => {
+    const snap = await runTool(
+      runtime,
+      manager.spawn("pi", task("measure spend")),
+    );
+    await runTool(runtime, manager.waitFor([snap.id]));
+    // The stub emits spend on the mid-turn UsageChanged only; the final
+    // usage event carries none, so the settled snapshot kept the last value.
+    assert.deepEqual(manager.view.get(snap.id)?.spend, stubSpend(0));
+
+    await runTool(runtime, manager.send(snap.id, "Second turn"));
+    await waitForManagerStatus(
+      manager,
+      snap.id,
+      "start the second run",
+      (status) => status === "running",
+    );
+    await runTool(runtime, manager.waitFor([snap.id]));
+    assert.deepEqual(manager.view.get(snap.id)?.spend, stubSpend(1));
   });
 });
 

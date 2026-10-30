@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { AxeBuilder } from "@axe-core/playwright";
 import { DEFAULT_SETUP_CONFIG } from "../../extensions/shared/setup-config.ts";
 import { projectWebSetupConfig } from "../../web/runtime/settings-catalog.ts";
 import {
@@ -6,6 +7,191 @@ import {
   MOCK_SESSION_ID,
   MOCK_SESSION_PATH,
 } from "./thinking-e2e-support.ts";
+
+test("settings pages align with the Browser layout across desktop, window and mobile sizes", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(120_000);
+  await installThinkingFixture(page);
+  await page.route("**/api/settings/catalog?**", (route) =>
+    route.fulfill({
+      json: {
+        sessionId: MOCK_SESSION_ID,
+        sessionPath: MOCK_SESSION_PATH,
+        setup: projectWebSetupConfig(DEFAULT_SETUP_CONFIG),
+        webSearch: { available: true, provider: "fixture", model: "current" },
+        resources: {
+          skills: [
+            {
+              id: "fixture-review",
+              name: "review",
+              description: "Review native resources.",
+              filePath: "/fixture/skills/review/SKILL.md",
+              source: "auto",
+              scope: "user",
+              origin: "top-level",
+              disableModelInvocation: false,
+            },
+          ],
+          plugins: [
+            {
+              id: "fixture-plugin",
+              name: "Review tools",
+              source: "/fixture/review-tools",
+              scope: "user",
+              origin: "package",
+              configured: true,
+              enabled: true,
+              installed: true,
+              installedVersion: "1.2.3",
+              baseDir: "/fixture/review-tools",
+              extensions: [],
+              skills: [],
+              prompts: [],
+              themes: [],
+            },
+          ],
+          totals: { extensions: 0, skills: 1, prompts: 0, themes: 0 },
+          diagnostics: { extensionErrors: 0, skillErrors: 0 },
+          truncation: {
+            truncated: false,
+            skillsOmitted: 0,
+            pluginsOmitted: 0,
+            resourcesOmitted: 0,
+          },
+        },
+      },
+    }),
+  );
+  await page.route("**/api/settings/browser", (route) =>
+    route.fulfill({
+      json: {
+        config: {
+          control: false,
+          embedded: true,
+          defaultBrowser: "embedded",
+          externalBrowsers: [],
+        },
+        profiles: [],
+        browsers: [{ id: "chrome", installed: true }],
+        extensionPath: "/fixture/browser-extension",
+        extensionVersion: "0.4.0",
+      },
+    }),
+  );
+  await page.route("**/api/models/configuration?**", (route) =>
+    route.fulfill({ json: { revision: "layout-fixture", models: [] } }),
+  );
+  await page.route("**/api/providers/auth-status?**", (route) =>
+    route.fulfill({
+      json: {
+        providers: [],
+        truncation: {
+          truncated: false,
+          providersOmitted: 0,
+          namesTruncated: 0,
+          maxProviders: 250,
+        },
+      },
+    }),
+  );
+  await page.goto("/?settings=browser");
+  await page.addStyleTag({
+    content:
+      "*, *::before, *::after { animation: none !important; transition: none !important; }",
+  });
+  const dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  const sections = [
+    ["browser", "浏览器"],
+    ["general", "常规"],
+    ["appearance", "外观"],
+    ["archived-chats", "已归档聊天"],
+    ["configuration", "配置"],
+    ["models", "模型"],
+    ["subagents", "子代理"],
+    ["web-search", "联网搜索"],
+    ["skills", "技能"],
+    ["plugins", "插件"],
+  ] as const;
+  for (const [width, height] of [
+    [1440, 1000],
+    [890, 792],
+    [390, 844],
+  ]) {
+    await page.setViewportSize({ width, height });
+    let reference: { x: number; y: number; font: string } | undefined;
+    for (const [section, label] of sections) {
+      if (width <= 700)
+        await dialog
+          .getByRole("combobox", { name: "设置导航", exact: true })
+          .selectOption(section);
+      else await dialog.getByRole("tab", { name: label, exact: true }).click();
+      const panel = dialog.getByRole("tabpanel", { name: label, exact: true });
+      await panel.evaluate((element) => {
+        element.scrollTop = 0;
+        const content = element.querySelector(".settings-content-page");
+        if (content) content.scrollTop = 0;
+      });
+      if (section === "general") {
+        const inset = await panel
+          .getByRole("switch", { name: "下一步建议", exact: true })
+          .evaluate((element) => {
+            const group = element.closest(".settings-chat-controls")!;
+            const row = Array.from(group.children).find((child) =>
+              child.contains(element),
+            )!;
+            const rowStyle = getComputedStyle(row);
+            return Math.min(
+              parseFloat(rowStyle.paddingLeft),
+              parseFloat(rowStyle.paddingRight),
+            );
+          });
+        expect(
+          inset,
+          `suggestion control inset at ${width}`,
+        ).toBeGreaterThanOrEqual(16);
+      }
+      const heading = panel.getByRole("heading", {
+        name: label,
+        exact: true,
+        level: 1,
+      });
+      await expect(heading).toBeVisible();
+      const box = await heading.boundingBox();
+      expect(box).not.toBeNull();
+      const font = await heading.evaluate(
+        (element) => getComputedStyle(element).fontSize,
+      );
+      if (!reference) reference = { x: box!.x, y: box!.y, font };
+      expect
+        .soft(Math.abs(box!.x - reference.x), `${label} left at ${width}`)
+        .toBeLessThanOrEqual(1);
+      expect
+        .soft(Math.abs(box!.y - reference.y), `${label} top at ${width}`)
+        .toBeLessThanOrEqual(1);
+      expect.soft(font, `${label} heading at ${width}`).toBe(reference.font);
+      expect
+        .soft(
+          await panel.evaluate(
+            (element) => element.scrollWidth <= element.clientWidth,
+          ),
+          `${label} overflow at ${width}`,
+        )
+        .toBe(true);
+      if (width === 1440)
+        expect
+          .soft(
+            (await new AxeBuilder({ page }).analyze()).violations,
+            `${label} accessibility`,
+          )
+          .toEqual([]);
+      await page.screenshot({
+        path: testInfo.outputPath(`${section}-${width}.png`),
+        fullPage: true,
+      });
+    }
+  }
+});
 
 test("native web search follows the current Session model with an on/off preference on desktop and mobile", async ({
   page,
@@ -192,17 +378,22 @@ test("resource settings preserve drafts, distinguish disabled and loaded state, 
   await dialog
     .getByLabel("软件包、仓库或本地路径", { exact: true })
     .fill("git:fixture/review");
-  await dialog
-    .getByRole("combobox", { name: "范围", exact: true })
-    .selectOption("project");
+  const scopeMenu = await dialog
+    .getByRole("button", { name: "范围", exact: true })
+    .getAttribute("aria-controls");
+  await dialog.getByRole("button", { name: "范围", exact: true }).click();
+  await page
+    .locator(`#${scopeMenu}`)
+    .getByRole("menuitemradio", { name: "项目", exact: true })
+    .click();
   await dialog.getByRole("tab", { name: "插件", exact: true }).click();
   await dialog.getByRole("tab", { name: "技能", exact: true }).click();
   await expect(
     dialog.getByLabel("软件包、仓库或本地路径", { exact: true }),
   ).toHaveValue("git:fixture/review");
   await expect(
-    dialog.getByRole("combobox", { name: "范围", exact: true }),
-  ).toHaveValue("project");
+    dialog.getByRole("button", { name: "范围", exact: true }),
+  ).toHaveText("项目");
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(
     dialog.getByRole("combobox", { name: "设置导航", exact: true }),
@@ -258,42 +449,61 @@ test("General result and footer controls save, restore after reload, and preserv
   await page.getByRole("button", { name: "设置", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "设置", exact: true });
   for (const label of ["子代理结果", "Bash 操作", "Write / Edit 操作"]) {
-    const control = dialog.getByRole("combobox", { name: label, exact: true });
-    await control.selectOption("full");
+    const control = dialog.getByRole("button", { name: label, exact: true });
+    const menuId = await control.getAttribute("aria-controls");
+    await control.click();
+    await page
+      .locator(`#${menuId}`)
+      .getByRole("menuitemradio", { name: "完整", exact: true })
+      .click();
     await expect(control).toBeEnabled();
-    await expect(control).toHaveValue("full");
+    await expect(control).toHaveText("完整");
   }
-  await dialog
-    .getByRole("combobox", { name: "终端页脚样式", exact: true })
-    .selectOption("powerline-mono");
+  const footerStyle = dialog.getByRole("button", {
+    name: "终端页脚样式",
+    exact: true,
+  });
+  const footerMenu = await footerStyle.getAttribute("aria-controls");
+  await footerStyle.click();
+  await page
+    .locator(`#${footerMenu}`)
+    .getByRole("menuitemradio", { name: "Powerline Mono", exact: true })
+    .click();
   await expect(
-    dialog.getByRole("combobox", { name: "终端页脚样式", exact: true }),
+    dialog.getByRole("button", { name: "终端页脚样式", exact: true }),
   ).toBeEnabled();
   await dialog
     .getByRole("switch", { name: "Pi 终端页脚", exact: true })
     .click();
   await expect(
-    dialog.getByRole("combobox", { name: "终端页脚样式", exact: true }),
+    dialog.getByRole("button", { name: "终端页脚样式", exact: true }),
   ).toBeDisabled();
   await dialog
     .locator(".settings-general-panel")
     .screenshot({ path: testInfo.outputPath("settings-editable-desktop.png") });
   await page.reload();
   await expect(
-    dialog.getByRole("combobox", { name: "Bash 操作", exact: true }),
-  ).toHaveValue("full");
+    dialog.getByRole("button", { name: "Bash 操作", exact: true }),
+  ).toHaveText("完整");
   reject = true;
-  await dialog
-    .getByRole("combobox", { name: "Bash 操作", exact: true })
-    .selectOption("compact");
+  const bash = dialog.getByRole("button", {
+    name: "Bash 操作",
+    exact: true,
+  });
+  const bashMenu = await bash.getAttribute("aria-controls");
+  await bash.click();
+  await page
+    .locator(`#${bashMenu}`)
+    .getByRole("menuitemradio", { name: "紧凑", exact: true })
+    .click();
   await expect(
     dialog.getByText("无法保存显示设置，请检查配置诊断后重试。", {
       exact: true,
     }),
   ).toBeVisible();
   await expect(
-    dialog.getByRole("combobox", { name: "Bash 操作", exact: true }),
-  ).toHaveValue("full");
+    dialog.getByRole("button", { name: "Bash 操作", exact: true }),
+  ).toHaveText("完整");
   expect(patches).toEqual([
     { subagentResultDisplay: "full" },
     { bashToolDisplay: "full" },

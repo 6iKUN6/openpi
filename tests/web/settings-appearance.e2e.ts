@@ -11,9 +11,8 @@ async function installSettingsFixture(page: Page) {
   let archived = true;
   let failRestore = true;
   const queries: URLSearchParams[] = [];
-  await page.route("**/events?**", (route) =>
-    route.fulfill({ contentType: "text/event-stream", body: ": idle\n\n" }),
-  );
+  // Keep the owned Host's event stream open. A finite SSE response repeatedly
+  // reconnects and can supersede the snapshot confirming an archive restore.
   await page.route("**/api/snapshot**", async (route) => {
     const response = await route.fetch({
       url: new URL("/api/snapshot", route.request().url()).href,
@@ -98,7 +97,6 @@ async function installSettingsFixture(page: Page) {
     }
     for (const [key, field] of Object.entries({
       theme: "webTheme",
-      appearance: "webAppearance",
       chatWidth: "webChatWidth",
       chatFontSize: "webChatFontSize",
       expandThinking: "webExpandThinking",
@@ -106,6 +104,10 @@ async function installSettingsFixture(page: Page) {
       if (patch[key] !== undefined)
         Object.assign(config.ui, { [field]: patch[key] });
     }
+    if (patch.appearance !== undefined)
+      Object.assign(config.ui, {
+        webAppearance: { ...config.ui.webAppearance, ...patch.appearance },
+      });
     await route.fulfill({
       json: { saved: true, setup: projectWebSetupConfig(config) },
     });
@@ -182,8 +184,22 @@ test("settings shell, hover/focus, mode previews, menus and disclosure follow th
   await expect(
     dialog.getByRole("radiogroup", { name: "模式", exact: true }),
   ).toBeVisible();
-  await expect(dialog.getByRole("radio")).toHaveCount(3);
+  await expect(
+    dialog
+      .getByRole("radiogroup", { name: "模式", exact: true })
+      .getByRole("radio"),
+  ).toHaveCount(3);
   await expect(dialog.getByRole("slider")).toHaveCount(0);
+  const font = dialog.getByRole("button", { name: "字体", exact: true });
+  await expect(font).toHaveText("Codex 默认");
+  await font.click();
+  await expect(
+    page.getByRole("menuitem", { name: "Codex 默认", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "系统", exact: true }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(
     dialog.getByRole("textbox", { name: "背景", exact: true }),
@@ -230,13 +246,13 @@ test("settings shell, hover/focus, mode previews, menus and disclosure follow th
   await expect(
     dialog.getByRole("tab", { name: "外观", exact: true }),
   ).toBeFocused();
-  const theme = dialog.getByRole("button", { name: "主题", exact: true });
-  await theme.click();
-  await expect(
-    page.getByRole("menuitem", { name: "雾青", exact: true }),
-  ).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(theme).toBeFocused();
+  const themes = dialog.getByRole("radiogroup", { name: "主题", exact: true });
+  await expect(themes.getByRole("radio")).toHaveCount(4);
+  const mist = themes.getByRole("radio", { name: "雾青", exact: true });
+  await mist.focus();
+  await expect(mist).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(mist).toBeChecked();
   const advanced = dialog.getByRole("button", { name: "高级", exact: true });
   await advanced.click();
   await expect(advanced).toHaveAttribute("aria-expanded", "true");
@@ -248,6 +264,28 @@ test("settings shell, hover/focus, mode previews, menus and disclosure follow th
   await dialog.screenshot({
     path: testInfo.outputPath("appearance-desktop.png"),
   });
+});
+
+test("palette preview cards save, survive reload, and retain the previous palette on failure", async ({
+  page,
+}) => {
+  const fixture = await installSettingsFixture(page);
+  await page.goto("/?settings=appearance");
+  const themes = page.getByRole("radiogroup", { name: "主题", exact: true });
+  const mist = themes.getByRole("radio", { name: "雾青", exact: true });
+  await mist.click();
+  await expect(mist).toBeChecked();
+  expect(fixture.posts.at(-1)).toEqual({ appearance: { palette: "mist" } });
+  await page.reload();
+  await expect(mist).toBeChecked();
+  fixture.failNextWrite();
+  const rose = themes.getByRole("radio", { name: "蔷薇", exact: true });
+  await rose.click();
+  await expect(
+    page.getByText("无法保存显示设置，请检查配置诊断后重试。", { exact: true }),
+  ).toBeVisible();
+  await expect(mist).toBeChecked();
+  await expect(rose).not.toBeChecked();
 });
 
 test("appearance import applies canonical tokens and font, survives reload, and rolls failed writes back", async ({
@@ -309,6 +347,33 @@ test("appearance import applies canonical tokens and font, survives reload, and 
   });
 });
 
+test("legacy theme import selects the Codex default and keeps it after reload", async ({
+  page,
+}) => {
+  const fixture = await installSettingsFixture(page);
+  await page.goto("/?settings=appearance");
+  const dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  await dialog.getByRole("button", { name: "导入主题", exact: true }).click();
+  const importer = page.getByRole("dialog", { name: "导入主题", exact: true });
+  await importer.getByRole("textbox").fill(
+    JSON.stringify({
+      version: 1,
+      theme: "light",
+      appearance: { ...DEFAULT_SETUP_CONFIG.ui.webAppearance, font: "system" },
+    }),
+  );
+  await importer.getByRole("button", { name: "导入", exact: true }).click();
+  await expect(importer).toBeHidden();
+  expect(fixture.posts[0]).toMatchObject({ appearance: { font: "codex" } });
+  await page.reload();
+  await expect(
+    dialog.getByRole("button", { name: "字体", exact: true }),
+  ).toHaveText("Codex 默认");
+  expect(
+    await dialog.evaluate((node) => getComputedStyle(node).fontFamily),
+  ).toMatch(/^-apple-system,/u);
+});
+
 test("narrow mouse and touch layouts remain distinct and fit the viewport", async ({
   page,
   browser,
@@ -321,10 +386,15 @@ test("narrow mouse and touch layouts remain distinct and fit the viewport", asyn
     dialog.getByRole("combobox", { name: "设置导航", exact: true }),
   ).toBeVisible();
   await expect(dialog.getByRole("tablist")).toBeHidden();
-  const theme = dialog.getByRole("button", { name: "主题", exact: true });
+  const font = dialog.getByRole("button", { name: "字体", exact: true });
   expect(
-    await theme.evaluate((node) => node.getBoundingClientRect().height),
+    await font.evaluate((node) => node.getBoundingClientRect().height),
   ).toBeLessThan(44);
+  const themes = dialog.getByRole("radiogroup", { name: "主题", exact: true });
+  await expect(themes.getByRole("radio")).toHaveCount(4);
+  expect(
+    await themes.evaluate((node) => node.scrollWidth <= node.clientWidth),
+  ).toBe(true);
   expect(
     await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
   ).toBe(true);
@@ -345,16 +415,26 @@ test("narrow mouse and touch layouts remain distinct and fit the viewport", asyn
       name: "设置",
       exact: true,
     });
-    const touchTheme = touchDialog.getByRole("button", {
+    const touchFont = touchDialog.getByRole("button", {
+      name: "字体",
+      exact: true,
+    });
+    await expect(touchFont).toBeVisible();
+    await expect
+      .poll(() =>
+        touchFont.evaluate((node) => node.getBoundingClientRect().height),
+      )
+      .toBeGreaterThanOrEqual(44);
+    const touchThemes = touchDialog.getByRole("radiogroup", {
       name: "主题",
       exact: true,
     });
-    await expect(touchTheme).toBeVisible();
-    await expect
-      .poll(() =>
-        touchTheme.evaluate((node) => node.getBoundingClientRect().height),
-      )
-      .toBeGreaterThanOrEqual(44);
+    await expect(touchThemes.getByRole("radio")).toHaveCount(4);
+    expect(
+      await touchThemes.evaluate(
+        (node) => node.scrollWidth <= node.clientWidth,
+      ),
+    ).toBe(true);
     expect(
       await touchDialog.evaluate(
         (node) => node.scrollWidth <= node.clientWidth,
@@ -378,11 +458,15 @@ test("archived chats query project/sort before paging and restore without activa
     dialog.getByText("Archived design", { exact: true }),
   ).toBeVisible();
   await dialog
-    .getByRole("combobox", { name: "归档聊天排序", exact: true })
-    .selectOption("created");
-  await dialog
-    .getByRole("combobox", { name: "按项目筛选", exact: true })
-    .selectOption("/fixture");
+    .getByRole("button", { name: "归档聊天排序", exact: true })
+    .click();
+  await page
+    .getByRole("menuitemradio", { name: "创建时间", exact: true })
+    .click();
+  await dialog.getByRole("button", { name: "按项目筛选", exact: true }).click();
+  await page
+    .getByRole("menuitemradio", { name: "OpenPI", exact: true })
+    .click();
   await expect.poll(() => fixture.queries.at(-1)?.get("cwd")).toBe("/fixture");
   expect(fixture.queries.at(-1)?.get("sort")).toBe("created");
   const group = dialog.getByRole("button", {
@@ -415,6 +499,8 @@ test("archived chats query project/sort before paging and restore without activa
   });
   await dialog.getByRole("button", { name: "关闭", exact: true }).click();
   await expect(
-    page.locator(".session-sidebar").getByText("Active chat", { exact: true }),
+    page
+      .getByRole("region", { name: "OpenPI", exact: true })
+      .getByText("Active chat", { exact: true }),
   ).toBeVisible();
 });

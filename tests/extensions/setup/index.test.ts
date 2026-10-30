@@ -329,7 +329,7 @@ test("registers the canonical setup command, legacy alias, and one constrained t
   };
   assert.equal("suggestions_enabled" in parameters.properties, true);
   assert.equal("suggestion_model" in parameters.properties, true);
-  assert.equal("capability_discovery" in parameters.properties, true);
+  assert.equal("capability_discovery" in parameters.properties, false);
   assert.equal("ui_web_theme" in parameters.properties, true);
   const appearance = parameters.properties.ui_web_appearance as {
     required: string[];
@@ -652,12 +652,18 @@ test("post-edit stays off or preserved unless the setup request changes it", asy
     ui_web_auxiliary_width: 600,
     ui_web_chat_font_size: 16,
     ui_web_expand_thinking: true,
+    ui_web_sidebar_grouping: "list",
+    ui_web_chats_sort: "manual",
+    ui_web_projects_in_recents: false,
   });
   assert.equal(loadSetupConfig().ui.webChatWidth, 960);
   assert.equal(loadSetupConfig().ui.webSidebarWidth, 320);
   assert.equal(loadSetupConfig().ui.webAuxiliaryWidth, 600);
   assert.equal(loadSetupConfig().ui.webChatFontSize, 16);
   assert.equal(loadSetupConfig().ui.webExpandThinking, true);
+  assert.equal(loadSetupConfig().ui.webSidebarGrouping, "list");
+  assert.equal(loadSetupConfig().ui.webChatsSort, "manual");
+  assert.equal(loadSetupConfig().ui.webProjectsInRecents, false);
 
   await apply({ post_edit_command: "  npm run format  " });
   assert.equal(loadSetupConfig().postEdit.command, "npm run format");
@@ -1206,13 +1212,13 @@ test("setup receipts distinguish real changes from equivalent presets without ex
 
 test("successful setup result closes the episode and names the only re-entry", () => {
   const result = buildSetupSuccessText(
-    "Capability discovery: explicit.",
-    ["capabilities.discovery"],
+    "Footer style: plain.",
+    ["ui.footerStyle"],
     " Normalized or migrated stored values: ui.footerStyle.",
   );
 
   assert.match(result, /Saved OpenPI setup/);
-  assert.match(result, /Capability discovery: explicit/);
+  assert.match(result, /Footer style: plain/);
   assert.match(result, /Normalized or migrated.*ui\.footerStyle/);
   assert.match(result, /setup episode is complete/i);
   assert.match(result, /configure_my_pi_setup.*hidden/i);
@@ -1447,13 +1453,13 @@ test("session_start after host re-includes tools hides configure tool", async ()
 
 test("setActiveTools never snapshot-restores unrelated tools away", async () => {
   const h = visibilityHarness({
-    initialActive: ["read", "bash", "ask_user", "workflow", "fd"],
+    initialActive: ["read", "bash", "ask_user", "workflow", "git_show"],
   });
   await h.emit("session_start");
   assert.deepEqual(h.activeNames().sort(), [
     "ask_user",
     "bash",
-    "fd",
+    "git_show",
     "read",
     "workflow",
   ]);
@@ -1462,7 +1468,7 @@ test("setActiveTools never snapshot-restores unrelated tools away", async () => 
     "ask_user",
     "bash",
     CONFIGURE_MY_PI_SETUP_TOOL_NAME,
-    "fd",
+    "git_show",
     "read",
     "workflow",
   ]);
@@ -1470,7 +1476,7 @@ test("setActiveTools never snapshot-restores unrelated tools away", async () => 
   assert.deepEqual(h.activeNames().sort(), [
     "ask_user",
     "bash",
-    "fd",
+    "git_show",
     "read",
     "workflow",
   ]);
@@ -1524,9 +1530,6 @@ test("builds a model-guided first-run setup prompt with impacts", () => {
   assert.match(message, /This is the first setup/);
   assert.match(message, /Use ask_user/);
   assert.match(message, /Current Pi model: seal\/gpt-5\.6-sol/);
-  assert.match(message, /Capability discovery/);
-  assert.match(message, /explicit.*adaptive/);
-  assert.match(message, /adaptive.*opt-in/);
   assert.match(message, /dim inline text on the first row/);
   assert.match(message, /reserved cells.*CJK IME preedit/);
   assert.match(message, /Right accepts it without submitting/);
@@ -1538,7 +1541,7 @@ test("builds a model-guided first-run setup prompt with impacts", () => {
   );
   assert.match(message, /complete ui_web_appearance object defaults/);
   assert.match(message, /palette supports default\/mist\/rose\/pine/);
-  assert.match(message, /font supports system\/sans\/serif\/mono/);
+  assert.match(message, /font supports codex\/sans\/serif\/mono/);
   assert.match(message, /empty for the theme default or #RRGGBB/);
   assert.match(message, /Legacy ui_web_theme.*take precedence/);
   assert.match(message, /ui_web_theme=dark/);
@@ -1613,7 +1616,7 @@ test("builds a focused review prompt when configuration already exists", () => {
   assert.match(message, /Explain the current settings/);
   assert.match(
     message,
-    /keep them or change Code Mode, Capability discovery, optional Web search, Response preferences, Next-action suggestions, Workflow limits, OpenPI Web appearance, UI\/Footer, result detail display, Post-edit, Agent role models/,
+    /keep them or change Code Mode, optional Web search, Response preferences, Next-action suggestions, Workflow limits, OpenPI Web appearance, UI\/Footer, result detail display, Post-edit, Agent role models/,
   );
   assert.match(message, /keeps the current settings, do not call/);
   assert.match(message, /available only for this setup run/i);
@@ -1817,4 +1820,39 @@ test("setup tool propagates real consumer failure and preserves disk and runtime
   assert.equal(header, false);
   assert.equal(readFileSync(SETUP_CONFIG_PATH, "utf8"), "{}");
   rmSync(SETUP_CONFIG_PATH);
+});
+
+test("configure_my_pi_setup preserves malformed UTF-8 without applying", async () => {
+  const original = Buffer.concat([
+    Buffer.from('{"configVersion":1,"future":{"note":"'),
+    Buffer.from([0xff]),
+    Buffer.from('"}}\n'),
+  ]);
+  writeFileSync(SETUP_CONFIG_PATH, original);
+  const h = visibilityHarness();
+  let applies = 0;
+  onSetupApply({ events: h.events }, () => {
+    applies += 1;
+  });
+  const error = await h.tools
+    .get(CONFIGURE_MY_PI_SETUP_TOOL_NAME)!
+    .execute(
+      "invalid-utf8",
+      { ui_show_header: true },
+      new AbortController().signal,
+      () => {},
+      h.ctx,
+    )
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  assert.deepEqual(
+    {
+      rejected: error instanceof Error,
+      applies,
+      unchanged: readFileSync(SETUP_CONFIG_PATH).equals(original),
+    },
+    { rejected: true, applies: 0, unchanged: true },
+  );
 });

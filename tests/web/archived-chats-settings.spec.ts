@@ -85,17 +85,17 @@ it("uses the independent archive query, scopes sort/project on the server, and i
     );
   show();
   await screen.findByText("First chat");
-  fireEvent.change(
-    screen.getByRole("combobox", { name: i18n.t("archiveSort") }),
-    { target: { value: "created" } },
+  fireEvent.click(screen.getByRole("button", { name: i18n.t("archiveSort") }));
+  fireEvent.click(
+    screen.getByRole("menuitemradio", { name: i18n.t("archiveSortCreated") }),
   );
   await waitFor(() =>
     expect(list.mock.lastCall?.[0]).toMatchObject({ sort: "created" }),
   );
-  fireEvent.change(
-    screen.getByRole("combobox", { name: i18n.t("archiveProjectFilter") }),
-    { target: { value: "/projects/two" } },
+  fireEvent.click(
+    screen.getByRole("button", { name: i18n.t("archiveProjectFilter") }),
   );
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "Two" }));
   await waitFor(() =>
     expect(list.mock.lastCall?.[0]).toMatchObject({
       cwd: "/projects/two",
@@ -112,6 +112,36 @@ it("uses the independent archive query, scopes sort/project on the server, and i
   await act(async () => release(result([first])));
   expect(screen.queryByText("First chat")).toBeNull();
   expect(screen.getByText("Second chat")).toBeTruthy();
+});
+
+it("groups archived worktree forks under their source project and filters by that identity", async () => {
+  const list = vi
+    .spyOn(WebClient.prototype, "listArchivedSessions")
+    .mockResolvedValue(
+      result([
+        first,
+        {
+          ...second,
+          cwd: "/worktrees/fork-working-directory",
+          workspacePath: first.cwd,
+        },
+      ]),
+    );
+  show();
+  await screen.findByText("Second chat");
+  expect(
+    screen.getByRole("button", {
+      name: i18n.t("archiveProjectGroup", { project: "One", count: 2 }),
+    }),
+  ).toBeTruthy();
+  expect(
+    screen.queryByRole("option", { name: "fork-working-directory" }),
+  ).toBeNull();
+  fireEvent.click(
+    screen.getByRole("button", { name: i18n.t("archiveProjectFilter") }),
+  );
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "One" }));
+  await waitFor(() => expect(list.mock.lastCall?.[0]?.cwd).toBe(first.cwd));
 });
 
 it("keeps rows on a page failure and restarts a stale cursor query from the beginning", async () => {
@@ -133,6 +163,34 @@ it("keeps rows on a page failure and restarts a stale cursor query from the begi
   await screen.findByText("Second chat");
   expect(list.mock.lastCall?.[0]?.cursor).toBeUndefined();
   expect(screen.queryByText("First chat")).toBeNull();
+});
+
+it("offers continuation after an empty scan window and reveals older archives", async () => {
+  const list = vi
+    .spyOn(WebClient.prototype, "listArchivedSessions")
+    .mockResolvedValueOnce({
+      ...result([], "older-scan-window"),
+      truncation: {
+        ...result().truncation,
+        truncated: true,
+        recordsUnscanned: 1,
+      },
+    })
+    .mockResolvedValueOnce(result([first]));
+  show();
+  const more = await screen.findByRole("button", {
+    name: i18n.t("moreArchives"),
+  });
+  expect(screen.getByText(i18n.t("noScannedArchives"))).toBeTruthy();
+  expect(
+    screen.getByText(i18n.t("archiveScanBounded", { count: 1 })),
+  ).toBeTruthy();
+  fireEvent.click(more);
+  await screen.findByText("First chat");
+  expect(list.mock.lastCall?.[0]?.cursor).toBe("older-scan-window");
+  expect(
+    screen.queryByRole("button", { name: i18n.t("moreArchives") }),
+  ).toBeNull();
 });
 
 it("collapses groups without mutation, deduplicates restore, and retains a failed row until a confirmed restore", async () => {

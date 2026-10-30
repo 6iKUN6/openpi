@@ -63,7 +63,7 @@ for (const theme of ["light", "dark"] as const) {
     await page.goto("/");
     const conversation = page.locator(".conversation");
     const compaction = conversation.getByText("压缩已中断", { exact: true });
-    const reconnect = conversation.getByText("正在重新连接 2/2", {
+    const reconnect = conversation.getByText("模型请求重试中... 2/2", {
       exact: true,
     });
     const notice = conversation.getByRole("alert", { name: "上下文压缩失败" });
@@ -74,9 +74,22 @@ for (const theme of ["light", "dark"] as const) {
     await expect(notice.locator("svg.lucide-circle-alert")).toBeVisible();
     await expect(notice).toHaveCSS("border-top-style", "solid");
     await page.evaluate(() => document.fonts.ready);
-    const compactBounds = (await compaction.boundingBox())!;
-    const retryBounds = (await reconnect.boundingBox())!;
-    const errorBounds = (await notice.boundingBox())!;
+    // The conversation column can move during the sidebar width transition.
+    // Read all three rectangles in one frame so alignment compares one layout.
+    const [compactBounds, retryBounds, errorBounds] =
+      await conversation.evaluate((element) =>
+        [
+          element.querySelector(".context-compaction-text"),
+          element.querySelector(
+            ".provider-attempts > summary > [role='status']",
+          ),
+          element.querySelector(".execution-error"),
+        ].map((target) => {
+          if (!target) throw new Error("Missing visible conversation notice");
+          const { x, y, height } = target.getBoundingClientRect();
+          return { x, y, height };
+        }),
+      );
     expect(Math.abs(compactBounds.x - retryBounds.x)).toBeLessThanOrEqual(1);
     expect(compactBounds.y + compactBounds.height).toBeLessThan(retryBounds.y);
     expect(retryBounds.y + retryBounds.height).toBeLessThan(errorBounds.y);
@@ -112,6 +125,7 @@ for (const theme of ["light", "dark"] as const) {
 test("conversation text stays readable and file links retain their exact target", async ({
   page,
 }, testInfo) => {
+  let chatFontSize = 14;
   const path =
     "/workspace/packages/runtime-host/src/a-long-directory/session-history.ts";
   await page.route("**/events?**", (route) =>
@@ -125,7 +139,7 @@ test("conversation text stays readable and file links retain their exact target"
     const snapshot = (await response.json()) as WebSnapshot;
     if (!snapshot.selectedSession)
       throw new Error("Missing real Session fixture");
-    snapshot.preferences = { ...snapshot.preferences, chatFontSize: 14 };
+    snapshot.preferences = { ...snapshot.preferences, chatFontSize };
     snapshot.runtime = {
       ...snapshot.runtime,
       status: "idle",
@@ -140,6 +154,16 @@ test("conversation text stays readable and file links retain their exact target"
           role: "user",
           content:
             "帮我检查这次修改，列出结论和仍需验证的地方。保留执行过程，我还想向上查看之前的问题。",
+        },
+      },
+      {
+        id: "reading-commentary",
+        timestamp: "2026-09-22T08:00:00.500Z",
+        type: "message",
+        message: {
+          role: "assistant",
+          content:
+            "先核对当前源码，再检查阅读效果。Chinese and English should share the same reading rhythm.",
         },
       },
       {
@@ -189,13 +213,45 @@ test("conversation text stays readable and file links retain their exact target"
         },
       },
     ];
+    if (chatFontSize === 20) {
+      snapshot.selectedSession.entries.push({
+        id: "reading-timing",
+        type: "custom",
+        timestamp: "2026-09-22T08:00:04Z",
+        turnTiming: {
+          version: 1,
+          sessionId: snapshot.selectedSession.id,
+          commandId: "reading-command",
+          epoch: 1,
+          promptEntryId: "reading-question",
+          resultEntryId: "reading-answer",
+          startedAt: 0,
+          finishedAt: 4000,
+          elapsedMs: 4000,
+          outcome: "completed",
+        },
+      });
+    }
     await route.fulfill({ response, json: snapshot });
   });
-  for (const width of [1440, 390]) {
+  for (const scenario of [
+    { width: 1440, fontSize: 14 },
+    { width: 390, fontSize: 14 },
+    { width: 1440, fontSize: 20, paneWidth: 480 },
+    { width: 390, fontSize: 12 },
+  ]) {
+    const { width, fontSize, paneWidth } = scenario;
+    chatFontSize = fontSize;
     await page.setViewportSize({ width, height: 1000 });
     await page.goto("/");
+    if (paneWidth) {
+      await page.locator(".conversation-shell").evaluate((element, value) => {
+        element.style.width = `${value}px`;
+      }, paneWidth);
+    }
     const conversation = page.locator(".conversation");
     await expect(page.getByText("检查结果", { exact: true })).toBeVisible();
+    if (fontSize === 20) await page.locator(".turn-duration-toggle").click();
     await conversation.evaluate((element) => {
       element.scrollTo({ top: 0, behavior: "instant" });
     });
@@ -206,7 +262,7 @@ test("conversation text stays readable and file links retain their exact target"
       ),
     ).toBeInViewport({ ratio: 1 });
     const link = page
-      .locator(".message-row.response .markdown")
+      .locator(".message-row.final-response .markdown")
       .getByRole("button", { name: "session-history.ts", exact: true });
     await expect(link).toHaveAttribute("title", `Open read-only file: ${path}`);
     await expect(link.locator(".artifact-link-path")).toBeHidden();
@@ -216,10 +272,59 @@ test("conversation text stays readable and file links retain their exact target"
         (element) => element.scrollWidth <= element.clientWidth,
       ),
     ).toBe(true);
-    const response = page.locator(".message-row.response .markdown");
-    await expect(response).toHaveCSS("font-size", "14px");
+    const response = page.locator(".message-row.final-response .markdown");
+    await expect(response).toHaveCSS("font-size", `${fontSize}px`);
+    await expect(response.locator("h2")).toHaveCSS(
+      "font-size",
+      `${fontSize * 1.25}px`,
+    );
+    await expect(response.locator("strong")).toHaveCSS("font-weight", "600");
+    for (const node of await page
+      .locator(".message-row.response .markdown :is(p, li)")
+      .all()) {
+      await expect(node).toHaveCSS("font-size", `${fontSize}px`);
+      await expect(node).toHaveCSS("line-height", `${fontSize * 1.625}px`);
+      await expect(node).toHaveCSS("font-weight", "430");
+    }
+    await expect(response.locator(":scope > :last-child")).toHaveCSS(
+      "margin-bottom",
+      "0px",
+    );
+    const commentary = page.locator(".message-row.response").first();
+    const tool = page.locator(".process-sequence");
+    const commentaryBounds = (await commentary.boundingBox())!;
+    const toolBounds = (await tool.boundingBox())!;
+    expect(
+      Math.abs(
+        toolBounds.y - commentaryBounds.y - commentaryBounds.height - 16,
+      ),
+    ).toBeLessThanOrEqual(1);
+    const paragraph = commentary.locator("p");
+    expect((await paragraph.boundingBox())!.height).toBeGreaterThanOrEqual(
+      fontSize * 1.625 - 1,
+    );
+    if (paneWidth || width === 390) {
+      const pane = (await page.locator(".conversation-shell").boundingBox())!;
+      const turn = (await page.locator(".conversation-turn").boundingBox())!;
+      expect(turn.x - pane.x).toBeCloseTo(16, 0);
+      expect(turn.width).toBeCloseTo(pane.width - 32, 0);
+    }
+    if (fontSize === 20) {
+      const process = (await page
+        .locator(".turn-response-body")
+        .boundingBox())!;
+      const final = (await page.locator(".final-response").boundingBox())!;
+      expect(
+        Math.abs(final.y - process.y - process.height - 16),
+      ).toBeLessThanOrEqual(1);
+      await page.locator(".turn-duration-toggle").click();
+      await expect(page.locator(".turn-response-body")).toBeHidden();
+      await expect(response).toBeVisible();
+    }
     await page.screenshot({
-      path: testInfo.outputPath(`conversation-reading-${width}.png`),
+      path: testInfo.outputPath(
+        `conversation-reading-${width}-${fontSize}.png`,
+      ),
     });
   }
 });
@@ -249,6 +354,7 @@ for (const touch of [false, true]) {
         snapshot.preferences = {
           ...snapshot.preferences,
           expandThinking: false,
+          sidebarWidth: 340,
           theme: touch ? "light" : "dark",
         };
         snapshot.runtime = {
@@ -331,43 +437,59 @@ for (const touch of [false, true]) {
       await page.goto("/");
       const group = page.locator(".process-sequence:not(.single-process)");
       const summary = group.locator(":scope > summary");
-      const counts = summary.locator(".process-sequence-counts");
+      const counts = page
+        .getByRole("tooltip")
+        .filter({ hasText: /2.*工具调用/ });
       const arrow = summary.locator(".tool-disclosure");
       await expect(group).toHaveJSProperty("open", false);
       await expect(summary).toHaveAccessibleName(/2.*工具调用/);
       if (!touch) {
         await page.mouse.move(0, 0);
-        await expect(counts).toHaveCSS("opacity", "0");
-        await expect(arrow).toHaveCSS("opacity", "0");
+        await expect(counts).toBeHidden();
+        await expect(arrow).toHaveCSS("opacity", "1");
         await page.evaluate(() => document.fonts.ready);
+        const shell = page.locator(".app-shell");
+        // Observe the saved width before waiting, so a not-yet-started startup
+        // transition cannot be mistaken for stable hover geometry.
+        await expect(shell).toHaveCSS("--sidebar-width", "340px");
+        await shell.evaluate(async (element) => {
+          await Promise.all(
+            element.getAnimations().map((animation) => animation.finished),
+          );
+        });
         const before = await summary.boundingBox();
         await summary.hover();
-        await expect(counts).toHaveCSS("opacity", "1");
+        await expect(counts).toBeVisible();
         await expect(arrow).toHaveCSS("opacity", "1");
         expect(await summary.boundingBox()).toEqual(before);
         await page.mouse.move(0, 0);
-        await expect(counts).toHaveCSS("opacity", "0");
+        await expect(counts).toBeHidden();
         await page.keyboard.press("Tab");
         await summary.focus();
-        await expect(counts).toHaveCSS("opacity", "1");
+        await expect(counts).toBeVisible();
         await page.keyboard.press("Enter");
       } else {
-        await expect(counts).toHaveCSS("opacity", "1");
+        await expect(counts).toBeHidden();
         await expect(arrow).toHaveCSS("opacity", "1");
         await summary.tap();
       }
       await expect(group).toHaveJSProperty("open", true);
+      const toolRows = group.locator(".tool-evidence-card > summary");
+      await expect(toolRows).toHaveCount(2);
+      for (const row of await toolRows.all()) {
+        await expect(row).toHaveCSS("line-height", "21px");
+        expect((await row.boundingBox())!.height).toBe(touch ? 40 : 21);
+      }
+      const firstTool = (await toolRows.nth(0).boundingBox())!;
+      const nextTool = (await toolRows.nth(1).boundingBox())!;
+      expect(nextTool.y - firstTool.y - firstTool.height).toBeCloseTo(4, 0);
       const thinking = group.locator(".thinking-line");
       const thinkingSummary = thinking.locator(":scope > summary");
       const thinkingArrow = thinkingSummary.locator(".tool-disclosure");
       await expect(thinking).toHaveJSProperty("open", false);
       await expect(thinkingSummary).toHaveText("Inspecting implementation");
       await expect(thinkingSummary.locator(".lucide-lightbulb")).toBeVisible();
-      await expect(group.locator(".thought-tool-step")).toHaveCount(2);
-      await expect(group.locator(".thought-tool-step").first()).toHaveCSS(
-        "border-left-width",
-        "1px",
-      );
+      expect(firstTool.x).toBeCloseTo(nextTool.x, 0);
       if (!touch) {
         await expect(thinkingArrow).toHaveCSS("opacity", "0");
         await thinkingSummary.hover();

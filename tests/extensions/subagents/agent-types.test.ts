@@ -15,7 +15,7 @@ import {
 import {
   AGENT_TYPE_LIMITS,
   BUILT_IN_AGENT_TYPES,
-  formatAgentTypeDiagnostics,
+  formatAgentTypeNotices,
   loadAgentTypes,
   parseAgentType,
   roleModelForAgentType,
@@ -25,7 +25,7 @@ import {
 const VALID = `---
 name: explore
 description: Read-only exploration. Returns file:line references.
-tools: [read, grep, find, ls, fd, rg]
+tools: [read, grep, find, ls]
 model: anthropic/claude-sonnet-5
 reasoning_effort: medium
 ---
@@ -129,14 +129,7 @@ test("a valid agent type parses into prompt, tools, model, and effort", () => {
   assert.ok(result.agentType);
   assert.deepEqual(result.diagnostics, []);
   assert.equal(result.agentType.name, "explore");
-  assert.deepEqual(result.agentType.tools, [
-    "read",
-    "grep",
-    "find",
-    "ls",
-    "fd",
-    "rg",
-  ]);
+  assert.deepEqual(result.agentType.tools, ["read", "grep", "find", "ls"]);
   assert.equal(result.agentType.model, "anthropic/claude-sonnet-5");
   assert.equal(result.agentType.reasoningEffort, "medium");
   assert.equal(result.agentType.body, "You are a read-only exploration agent.");
@@ -220,6 +213,23 @@ test("an unrecognized tool name is reported but still applied", () => {
   );
 });
 
+test("retired OpenPI tool names are reported and ignored", () => {
+  const result = parseAgentType(
+    "---\nname: explore\ndescription: Stale tools.\ntools: [read, fd, rg, tasks_add]\n---\nBody.",
+    "explore",
+  );
+
+  assert.ok(result.agentType);
+  const messages = result.diagnostics.map((entry) => entry.message).join("\n");
+  assert.match(messages, /"fd" in explore is no longer provided by OpenPI/);
+  assert.match(messages, /"rg" in explore is no longer provided by OpenPI/);
+  assert.match(
+    messages,
+    /"tasks_add" in explore is no longer provided by OpenPI/,
+  );
+  assert.doesNotMatch(messages, /unrecognized tool "fd"/);
+});
+
 test("an over-long body is rejected rather than silently truncated", () => {
   const body = "x".repeat(AGENT_TYPE_LIMITS.bodyChars + 1);
   const result = parseAgentType(
@@ -299,11 +309,109 @@ test("a project agent type overrides the global one of the same name", async () 
     assert.equal(agentTypes.size, 4);
     assert.deepEqual(agentTypes.get("explorer")?.tools, ["read"]);
     assert.equal(agentTypes.get("explorer")?.planningCompatible, undefined);
-    // Global replaces the built-in, then the trusted project replaces global.
-    const messages = diagnostics.map((entry) => entry.message).join("\n");
-    assert.match(messages, /from built-in:explorer/);
-    assert.match(messages, /from .*agent[\\/]agents[\\/]explorer\.md/);
+    // Report the final project override, not the superseded global definition.
+    assert.equal(diagnostics.length, 1);
+    assert.match(
+      diagnostics[0]?.message ?? "",
+      /from .*agent[\\/]agents[\\/]explorer\.md/,
+    );
   });
+});
+
+test("normal overrides are informational, compact, and show only the effective definition", async () => {
+  await withTempDir(async (root) => {
+    const { agentDir, cwd } = await seed(root, {
+      global: { "explorer.md": BUILT_IN_EXPLORER },
+      project: { "explorer.md": BUILT_IN_EXPLORER },
+    });
+    const loaded = loadAgentTypes({ agentDir, cwd, projectTrusted: true });
+    assert.ok(loaded.diagnostics.every((entry) => entry.kind === "override"));
+    const notices = formatAgentTypeNotices(loaded.diagnostics, root);
+    assert.deepEqual(notices, [
+      {
+        level: "info",
+        message:
+          "Agent roles · 1 custom override\n  explorer  ← ~/project/.pi/agents/explorer.md",
+      },
+    ]);
+    assert.doesNotMatch(notices[0]!.message, /problem|warning|built-in:/i);
+  });
+});
+
+test("a rejected project override never reports the blocked global role as active", async () => {
+  await withTempDir(async (root) => {
+    const { agentDir, cwd } = await seed(root, {
+      global: { "explorer.md": BUILT_IN_EXPLORER },
+      project: {
+        "explorer.md": "---\nname: explorer\n---\nMissing description.",
+      },
+    });
+    const loaded = loadAgentTypes({ agentDir, cwd, projectTrusted: true });
+    assert.equal(loaded.agentTypes.has("explorer"), false);
+    const notices = formatAgentTypeNotices(loaded.diagnostics, root);
+    assert.deepEqual(
+      notices.map((notice) => notice.level),
+      ["warning"],
+    );
+    assert.match(notices[0]!.message, /blocks fallback/);
+  });
+});
+
+test("warnings remain separate and take priority over normal overrides", () => {
+  const notices = formatAgentTypeNotices(
+    [
+      {
+        kind: "override",
+        name: "explorer",
+        source: "/home/test/agents/explorer.md",
+        message: "override",
+      },
+      {
+        source: "/home/test/agents/broken.md",
+        message: "invalid YAML; role rejected",
+      },
+      {
+        kind: "override",
+        name: "implementer",
+        source: "/home/test/agents/implementer.md",
+        message: "override",
+      },
+    ],
+    "/home/test",
+  );
+  assert.deepEqual(notices, [
+    {
+      level: "warning",
+      message:
+        "Agent roles · 1 warning\n  ~/agents/broken.md\n    invalid YAML; role rejected",
+    },
+    {
+      level: "info",
+      message:
+        "Agent roles · 2 custom overrides\n  explorer     ← ~/agents/explorer.md\n  implementer  ← ~/agents/implementer.md",
+    },
+  ]);
+});
+
+test("home abbreviation respects path boundaries and sanitizes override metadata", () => {
+  const notices = formatAgentTypeNotices(
+    [
+      {
+        kind: "override",
+        name: "explorer\u001b[31m",
+        source: "/home/test-other/agents/explorer.md\u001b]52;c;bad\u0007",
+        message: "override",
+      },
+    ],
+    "/home/test",
+  );
+  assert.deepEqual(notices, [
+    {
+      level: "info",
+      message:
+        "Agent roles · 1 custom override\n  explorer  ← /home/test-other/agents/explorer.md",
+    },
+  ]);
 });
 
 test("a missing agents directory is normal, and one bad file does not sink the rest", async () => {
@@ -337,10 +445,10 @@ test("a missing agents directory is normal, and one bad file does not sink the r
     ]);
     assert.equal(loaded.diagnostics.length, 1);
     assert.match(
-      formatAgentTypeDiagnostics(loaded.diagnostics) ?? "",
-      /1 problem/,
+      formatAgentTypeNotices(loaded.diagnostics)[0]?.message ?? "",
+      /1 warning/,
     );
-    assert.equal(formatAgentTypeDiagnostics([]), undefined);
+    assert.deepEqual(formatAgentTypeNotices([]), []);
   });
 });
 
@@ -404,13 +512,18 @@ test("model selection keeps parent inheritance until an override exists", () => 
 });
 
 test("agent-type diagnostics strip terminal control sequences", () => {
-  const notice = formatAgentTypeDiagnostics([
+  const notices = formatAgentTypeNotices([
     {
       source: "\u001b]52;c;Y2xpcGJvYXJk\u0007bad.md",
       message: "\u001b[31mwrong\u001b[0m",
     },
   ]);
-  assert.equal(notice, "Agent types: 1 problem.\n- bad.md: wrong");
+  assert.deepEqual(notices, [
+    {
+      level: "warning",
+      message: "Agent roles · 1 warning\n  bad.md\n    wrong",
+    },
+  ]);
 });
 
 test("childToolPolicy without an allowlist is unchanged", () => {

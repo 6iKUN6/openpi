@@ -13,6 +13,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { registerPlanControl } from "../../extensions/plan-mode/control.ts";
+import { sessionChildExecutionAdmission } from "../../extensions/shared/child-execution-admission.ts";
 import { jsonByteLength } from "../../web/protocol/types.ts";
 import {
   createCommandDiscoveryBridge,
@@ -265,6 +266,7 @@ type PromptRuntimeHarness = {
   inFlightRuntimes: Map<FakeAgentRuntime, number>;
   promptOperations: Set<Promise<void>>;
   runtimeOperations: Set<Promise<void>>;
+  historyForkReceipts: Map<string, never>;
   candidateRuntimes: Set<FakeAgentRuntime>;
   runtimeDisposals: Set<Promise<void>>;
   runtimeDisposalFailure?: unknown;
@@ -289,8 +291,10 @@ type PromptRuntimeHarness = {
 
 type LifecycleSession = {
   isStreaming: boolean;
+  readonly isIdle: boolean;
   sessionManager: { getSessionId: () => string };
-  bindExtensions: () => Promise<void>;
+  bindExtensions: (bindings?: { mode?: string }) => Promise<void>;
+  bindModes: string[];
   abort: () => Promise<void>;
   subscribe: (listener: (event: { type: string }) => void) => () => void;
   binds: number;
@@ -321,6 +325,7 @@ type LifecycleHarness = {
   runtimeDisposals: Set<Promise<void>>;
   promptOperations: Set<Promise<void>>;
   runtimeOperations: Set<Promise<void>>;
+  historyForkReceipts: Map<string, never>;
   candidateRuntimes: Set<LifecycleRuntime>;
   pendingPromptTraces: Trace[];
   activePromptTrace?: Trace;
@@ -342,13 +347,18 @@ function lifecycleSession(
 ) {
   const session: LifecycleSession = {
     isStreaming,
+    get isIdle() {
+      return !this.isStreaming;
+    },
     sessionManager: { getSessionId: () => sessionId },
     binds: initialBinds,
     subscriptions: 0,
     unsubscribes: 0,
     aborts: 0,
-    async bindExtensions() {
+    bindModes: [],
+    async bindExtensions(bindings?: { mode?: string }) {
       session.binds += 1;
+      session.bindModes.push(bindings?.mode ?? "");
     },
     async abort() {
       session.aborts += 1;
@@ -391,6 +401,7 @@ function lifecycleHarness(runtime: LifecycleRuntime) {
   harness.runtimeDisposals = new Set();
   harness.promptOperations = new Set();
   harness.runtimeOperations = new Set();
+  harness.historyForkReceipts = new Map<string, never>();
   harness.candidateRuntimes = new Set();
   harness.pendingPromptTraces = [];
   harness.turnAbortOperations = new Map();
@@ -428,6 +439,7 @@ function promptHarness(session: ReturnType<typeof promptSession>) {
   harness.inFlightRuntimes = new Map();
   harness.promptOperations = new Set();
   harness.runtimeOperations = new Set();
+  harness.historyForkReceipts = new Map<string, never>();
   harness.candidateRuntimes = new Set();
   harness.runtimeDisposals = new Set();
   harness.runtimeDisposalPromises = new WeakMap();
@@ -2077,7 +2089,12 @@ test("a command's delayed native turn retains its origin without lending it to a
   );
   project.call(runtime, session, { type: "agent_settled" });
   project.call(runtime, session, { type: "agent_start" });
-  assert.equal(events.at(-1)?.detail?.activeTurn, undefined);
+  assert.match(
+    String(
+      (events.at(-1)?.detail?.activeTurn as { commandId?: string })?.commandId,
+    ),
+    /^native-/u,
+  );
 });
 
 test("later prompt failures retain their command and Session correlation", async () => {
@@ -2431,6 +2448,24 @@ test("a retained runtime rebind cannot replace the active Session subscription",
   assert.equal(harness.retainedRuntimes.has(runtimeA), false);
 });
 
+test("web sessions bind extensions as rpc, not print", async () => {
+  const session = lifecycleSession("session-a", false, 0);
+  const runtime = lifecycleRuntime(session);
+  const harness = lifecycleHarness(runtime);
+  const bindExtensions = (
+    PiWebRuntime.prototype as unknown as {
+      bindExtensions(
+        this: LifecycleHarness,
+        runtime: LifecycleRuntime,
+        session: LifecycleSession,
+      ): Promise<void>;
+    }
+  ).bindExtensions;
+  await bindExtensions.call(harness, runtime, session);
+  await bindExtensions.call(harness, runtime, session);
+  assert.deepEqual(session.bindModes, ["rpc", "rpc"]);
+});
+
 test("failed replacement activation restores the previous runtime without rebinding it", async () => {
   const previousSession = lifecycleSession("session-a", false, 1);
   const previous = lifecycleRuntime(previousSession);
@@ -2665,7 +2700,11 @@ test("message_end and queued prompts do not settle a running turn", (t) => {
   t.mock.method(Date, "now", () => 10000);
   t.mock.method(performance, "now", () => 100);
   const session = {
-    sessionManager: { getSessionId: () => "session", getBranch: () => [] },
+    sessionManager: {
+      getSessionId: () => "session",
+      getSessionFile: () => undefined,
+      getBranch: () => [],
+    },
   };
   const harness = Object.create(PiWebRuntime.prototype) as RuntimeHarness;
   harness.runtime = { session };
@@ -2840,7 +2879,13 @@ for (const aborted of [false, true]) {
   test(`toolUse without a terminal result preserves native aborted=${aborted}`, (t) => {
     t.mock.method(Date, "now", () => 10000);
     t.mock.method(performance, "now", () => 100);
-    const session = { sessionManager: { getSessionId: () => "session" } };
+    const session = {
+      sessionManager: {
+        getSessionId: () => "session",
+        getSessionFile: () => undefined,
+        getBranch: () => [],
+      },
+    };
     const harness = Object.create(PiWebRuntime.prototype) as RuntimeHarness;
     harness.runtime = { session };
     harness.pendingPromptTraces = [];
@@ -3439,4 +3484,229 @@ test("a merged thinking selection rejects callers whose expected session changed
   );
   // Only the still-active Session's intent is written.
   assert.deepEqual(fixture.state.calls, ["minimal"]);
+});
+
+const projectNativeTurnEvent = (
+  PiWebRuntime.prototype as unknown as {
+    projectEvent(
+      this: PromptRuntimeHarness,
+      session: object,
+      event: object,
+    ): void;
+  }
+).projectEvent;
+
+function activeNativeTurn(runtime: PromptRuntimeHarness) {
+  return PiWebRuntime.prototype.getActiveTurn.call(
+    runtime as unknown as PiWebRuntime,
+  );
+}
+
+test("a native run has one identity through retries and terminal native cancellation", () => {
+  const session = promptSession("native-session");
+  const runtime = promptHarness(session);
+  const events: WebRuntimeEvent[] = [];
+  runtime.subscribe((event) => events.push(event));
+  projectNativeTurnEvent.call(runtime, session, { type: "agent_start" });
+  const first = activeNativeTurn(runtime);
+  assert.ok(first);
+  assert.match(first.commandId, /^native-/u);
+  assert.equal(first.sessionId, "native-session");
+  assert.equal(first.sessionPath, "current:native-session");
+  assert.equal(first.promptEntryId, undefined);
+  projectNativeTurnEvent.call(runtime, session, { type: "agent_start" });
+  assert.equal(activeNativeTurn(runtime)?.epoch, first.epoch);
+  assert.equal(
+    events.filter((event) => event.type === "turn_started").length,
+    1,
+  );
+  projectNativeTurnEvent.call(runtime, session, {
+    type: "message_end",
+    message: { role: "assistant", content: [], stopReason: "stop" },
+  });
+  projectNativeTurnEvent.call(runtime, session, {
+    type: "agent_settled",
+    aborted: true,
+  });
+  assert.equal(
+    events.find((event) => event.type === "turn_settled")?.detail?.outcome,
+    "cancelled",
+  );
+  assert.equal(activeNativeTurn(runtime), undefined);
+  projectNativeTurnEvent.call(runtime, session, { type: "agent_start" });
+  assert.notEqual(activeNativeTurn(runtime)?.commandId, first.commandId);
+  assert.ok(activeNativeTurn(runtime)!.epoch > first.epoch);
+});
+
+test("native synchronous abort settlement does not retain an abort operation", async () => {
+  const session = promptSession("native-sync");
+  const runtime = promptHarness(session);
+  projectNativeTurnEvent.call(runtime, session, { type: "agent_start" });
+  const turn = activeNativeTurn(runtime);
+  assert.ok(turn);
+  session.abort = async () => {
+    projectNativeTurnEvent.call(runtime, session, {
+      type: "agent_settled",
+      aborted: true,
+    });
+  };
+  assert.equal((await runtime.cancelTurn(turn)).state, "accepted");
+  assert.equal(runtime.turnAbortOperations.size, 0);
+  assert.equal((await runtime.cancelTurn(turn)).state, "already-settled");
+});
+
+test("a retained native run is projected only for its own Session and survives promotion", async () => {
+  const session = promptSession("native-retained");
+  session.isStreaming = true;
+  const selected = promptSession("selected-b");
+  const runtime = promptHarness(selected);
+  const owner = { session, dispose: async () => undefined };
+  let observe: ((event: object) => void) | undefined;
+  session.subscribe = (listener) => {
+    observe = listener as unknown as (event: object) => void;
+    return () => true;
+  };
+  const lifecycle = runtime as unknown as {
+    retainRuntime(candidate: typeof owner): void;
+    promoteRetainedRuntime(candidate: typeof owner): Promise<void>;
+  };
+  const events: WebRuntimeEvent[] = [];
+  runtime.subscribe((event) => events.push(event));
+  lifecycle.retainRuntime(owner);
+  observe!({ type: "agent_start" });
+  assert.equal(activeNativeTurn(runtime), undefined);
+  assert.equal(
+    events.some((event) => event.type === "turn_started"),
+    false,
+  );
+  await lifecycle.promoteRetainedRuntime(owner);
+  const turn = activeNativeTurn(runtime);
+  assert.ok(turn);
+  assert.equal(turn.sessionId, "native-retained");
+  assert.match(turn.commandId, /^native-/u);
+  projectNativeTurnEvent.call(runtime, session, {
+    type: "agent_settled",
+    aborted: true,
+  });
+  assert.equal(
+    events.find((event) => event.type === "turn_settled")?.detail?.commandId,
+    turn.commandId,
+  );
+});
+
+test("a retained native preparing Session is not disposed before public agent_start", () => {
+  const session = promptSession("native-preparing");
+  Object.defineProperty(session, "isIdle", { get: () => false });
+  const runtime = promptHarness(promptSession("selected"));
+  const owner = { session, dispose: async () => undefined };
+  (
+    runtime as unknown as { retainRuntime(candidate: typeof owner): void }
+  ).retainRuntime(owner);
+  assert.ok(runtime.retainedRuntimes.has(owner));
+});
+
+test("switching away from an idle parent retains active and queued children until delivery can wake it", async () => {
+  const session = promptSession("parent-with-children");
+  const admission = sessionChildExecutionAdmission(session.sessionManager, {
+    maxActive: 1,
+  });
+  const first = await admission.acquire("direct");
+  const queued = admission.acquire("btw");
+  const runtime = promptHarness(promptSession("other-session"));
+  let disposals = 0;
+  const owner = {
+    session,
+    dispose: async () => {
+      disposals++;
+    },
+  };
+  const lifecycle = runtime as unknown as {
+    retainRuntime(candidate: typeof owner): void;
+  };
+  lifecycle.retainRuntime(owner);
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  assert.equal(disposals, 0);
+  assert.ok(runtime.retainedRuntimes.has(owner));
+  first.release();
+  const second = await queued;
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  assert.equal(disposals, 0);
+  // The child releases its permit before its completion callback starts the
+  // parent's native continuation. That callback must retain the same owner.
+  second.release();
+  session.isStreaming = true;
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  assert.equal(disposals, 0);
+  session.isStreaming = false;
+  const release = runtime as unknown as {
+    releaseRetainedRuntime(candidate: typeof owner): void;
+  };
+  release.releaseRetainedRuntime(owner);
+  await Promise.resolve();
+  assert.equal(disposals, 1);
+});
+
+test("a child-only retained parent is released after its last child settles without waking the parent", async () => {
+  const session = promptSession("parent-with-btw");
+  const admission = sessionChildExecutionAdmission(session.sessionManager, {});
+  const child = await admission.acquire("btw");
+  const runtime = promptHarness(promptSession("other-session"));
+  let disposals = 0;
+  const owner = {
+    session,
+    dispose: async () => {
+      disposals++;
+    },
+  };
+  (
+    runtime as unknown as { retainRuntime(candidate: typeof owner): void }
+  ).retainRuntime(owner);
+  await Promise.resolve();
+  assert.equal(disposals, 0);
+  child.release();
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  assert.equal(disposals, 1);
+  assert.equal(runtime.retainedRuntimes.has(owner), false);
+});
+
+test("a native handle cannot follow the same Session id into a different file", () => {
+  const session = promptSession("native-copy");
+  let path = "/sessions/original.jsonl";
+  session.sessionManager.getSessionFile = () => path;
+  const runtime = promptHarness(session);
+  projectNativeTurnEvent.call(runtime, session, { type: "agent_start" });
+  assert.ok(activeNativeTurn(runtime));
+  path = "/sessions/copied.jsonl";
+  assert.equal(activeNativeTurn(runtime), undefined);
+});
+
+test("retained settlement rechecks a deferred native wake before disposing its owner", async () => {
+  const session = promptSession("native-deferred");
+  session.isStreaming = true;
+  const runtime = promptHarness(promptSession("selected-other"));
+  let disposals = 0;
+  const owner = {
+    session,
+    dispose: async () => {
+      disposals += 1;
+    },
+  };
+  let observe: ((event: object) => void) | undefined;
+  session.subscribe = (listener) => {
+    observe = listener as unknown as (event: object) => void;
+    return () => true;
+  };
+  (
+    runtime as unknown as { retainRuntime(candidate: typeof owner): void }
+  ).retainRuntime(owner);
+  observe!({ type: "agent_start" });
+  session.isStreaming = false;
+  observe!({ type: "agent_settled", aborted: false });
+  // Pi deferred settled actions synchronously mark the next run busy before
+  // yielding in before_agent_start, after the public settled subscriber returns.
+  Object.defineProperty(session, "isIdle", { get: () => false });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(disposals, 0);
+  assert.ok(runtime.retainedRuntimes.has(owner));
 });

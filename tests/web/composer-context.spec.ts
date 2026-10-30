@@ -279,6 +279,12 @@ it("manual compaction and queue recovery use exact native Session endpoints with
     "/tmp/workspace/one.jsonl",
     "retry",
   );
+  data.selectedExecution = {
+    ...data.selectedExecution,
+    status: "running",
+    promptQueueBlocked: false,
+  };
+  rerender(node({ ...props, snapshot: data }));
   await act(async () =>
     fireEvent.click(
       screen.getByRole("button", { name: i18n.t("clearPromptQueue") }),
@@ -289,6 +295,9 @@ it("manual compaction and queue recovery use exact native Session endpoints with
     "/tmp/workspace/one.jsonl",
     "clear",
   );
+  expect(input.value).toBe("Keep during compact");
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(refreshSnapshot).toHaveBeenCalledTimes(3);
 });
 
 it("lets a user click Send for a follow-up while Stop remains available", async () => {
@@ -338,6 +347,7 @@ it("hides another controller's model and stale queue receipt while offering acti
   const value = snapshot();
   value.currentSessionId = "other";
   value.currentSessionPath = "/tmp/other.jsonl";
+  value.runtime.status = "running";
   value.models = [
     {
       provider: "p",
@@ -355,7 +365,75 @@ it("hides another controller's model and stale queue receipt while offering acti
   expect(
     screen.getByRole("button", { name: i18n.t("activateViewedSession") }),
   ).toBeTruthy();
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox").disabled).toBe(false);
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox").placeholder).toBe(
+    i18n.t("promptMessage"),
+  );
+  fireEvent.change(screen.getByRole("textbox"), {
+    target: { value: "Continue this conversation" },
+  });
+  expect(screen.queryByText(i18n.t("queuedHint"))).toBeNull();
+  expect(screen.queryByRole("button", { name: i18n.t("stopTurn") })).toBeNull();
+  expect(
+    screen.getByRole<HTMLButtonElement>("button", { name: i18n.t("send") })
+      .disabled,
+  ).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: i18n.t("addContext") }));
+  expect(
+    screen.getByRole<HTMLButtonElement>("menuitem", { name: /^Model model/u })
+      .disabled,
+  ).toBe(true);
 });
+
+it.each(["confirmed", "rejected", "different-session", "copied-id"])(
+  "prepares the viewed conversation on explicit send and preserves unaccepted drafts (%s)",
+  async (outcome) => {
+    const value = snapshot();
+    value.currentSessionId = "other";
+    value.currentSessionPath = "/tmp/other.jsonl";
+    const target = {
+      epoch: 1,
+      sessionId: outcome === "different-session" ? "other" : "session-1",
+      sessionPath:
+        outcome === "copied-id"
+          ? "/tmp/workspace/copy.jsonl"
+          : "/tmp/workspace/one.jsonl",
+      workspacePath: "/tmp/workspace",
+    };
+    const prepareSession = vi.fn(async () =>
+      outcome === "rejected" ? null : target,
+    );
+    const sendPrompt = vi.fn(async () => true);
+    setup({
+      snapshot: value,
+      actions: {
+        ...createWebStore().getState().actions,
+        prepareSession,
+        sendPrompt,
+      },
+    });
+    const input = screen.getByRole<HTMLTextAreaElement>("textbox");
+    fireEvent.change(input, {
+      target: { value: "Continue this conversation" },
+    });
+    expect(prepareSession).not.toHaveBeenCalled();
+    await act(async () => fireEvent.submit(input.closest("form")!));
+    expect(prepareSession).toHaveBeenCalledOnce();
+    if (outcome === "confirmed") {
+      expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+        "Continue this conversation",
+        [],
+        undefined,
+        undefined,
+        target,
+      );
+      expect(input.value).toBe("");
+    } else {
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe("Continue this conversation");
+    }
+  },
+);
 
 it("groups native actions like DSH without extra settings, permission, feedback or export entries", async () => {
   const { sendPrompt } = setup();
@@ -367,7 +445,6 @@ it("groups native actions like DSH without extra settings, permission, feedback 
     screen.getAllByRole("menuitem").map((item) => item.textContent),
   ).toEqual([
     expect.stringContaining("Filefile"),
-    expect.stringContaining("Goalgoal"),
     expect.stringContaining("Planplan"),
     expect.stringContaining("Compactcompact"),
     expect.stringContaining("Modelmodel"),
@@ -375,16 +452,13 @@ it("groups native actions like DSH without extra settings, permission, feedback 
   expect(
     screen.queryByRole("button", { name: i18n.t("providerAvailability") }),
   ).toBeNull();
-  fireEvent.click(screen.getByRole("menuitem", { name: /^Goal goal/u }));
   const input = screen.getByRole<HTMLTextAreaElement>("textbox", {
     name: i18n.t("describeTask"),
   });
-  await waitFor(() => expect(document.activeElement).toBe(input));
-  expect(input.value).toBe("/goal ");
-  expect(input.selectionStart).toBe(6);
-  expect(sendPrompt).not.toHaveBeenCalled();
-  fireEvent.keyDown(input, { key: "Escape" });
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  input.focus();
   expect(document.activeElement).toBe(input);
+  expect(sendPrompt).not.toHaveBeenCalled();
 });
 
 it("bounds a prompt-derived target while retaining the complete identity", () => {
@@ -409,9 +483,9 @@ it("keeps a nonempty draft and its exact text-only prompt contract", async () =>
   fireEvent.change(input, { target: { value: "  Review this\ncarefully  " } });
   fireEvent.click(screen.getByRole("button", { name: i18n.t("addContext") }));
   expect(
-    screen.getByRole<HTMLButtonElement>("menuitem", { name: /^Goal goal/u })
+    screen.getByRole<HTMLButtonElement>("menuitem", { name: /^Plan plan/u })
       .disabled,
-  ).toBe(true);
+  ).toBe(false);
   fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
   input.focus();
   fireEvent(
@@ -1012,7 +1086,7 @@ it("does not transfer a settled submission into a different session", async () =
   expect(input.value).toBe("new draft");
 });
 
-it("does not expose send or stop for a copied Session with the controller's embedded id", () => {
+it("allows a copied Session draft without exposing the controller's stop action", () => {
   const value = snapshot();
   value.selectedSession!.path = "/tmp/workspace/copied.jsonl";
   value.runtime.status = "running";
@@ -1028,5 +1102,5 @@ it("does not expose send or stop for a copied Session with the controller's embe
     liveRunning: true,
   });
   expect(screen.queryByRole("button", { name: i18n.t("stopTurn") })).toBeNull();
-  expect(screen.getByRole<HTMLTextAreaElement>("textbox").disabled).toBe(true);
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox").disabled).toBe(false);
 });

@@ -57,7 +57,20 @@ const settingsSections = [
     group: "settingsPersonal",
     label: "generalSettings",
     Icon: SlidersHorizontal,
-    terms: ["agentBehavior", "resultDisplay", "workflowLimits"],
+    terms: [
+      "agentBehavior",
+      "resultDisplay",
+      "workflowLimits",
+      "runtimeIdentity",
+      "runtimeBackendVersion",
+      "runtimePackageRoot",
+      "runtimeStartedAt",
+      "runtimeGitRevision",
+      "runtimeGitState",
+      "runtimeFrontendVersion",
+      "runtimeFrontendBuild",
+      "runtimeStartupBuild",
+    ],
   },
   {
     id: "appearance",
@@ -150,6 +163,7 @@ export function ProviderSettingsPage({
   currentModel,
   thinkingLevel,
   theme,
+  preferences,
   workspaces = [],
   onRestoreSession,
   capabilities,
@@ -174,6 +188,7 @@ export function ProviderSettingsPage({
   currentModel?: WebModelSummary;
   thinkingLevel: string;
   theme: WebThemePreference;
+  preferences?: WebSnapshot["preferences"];
   workspaces?: WebWorkspaceSummary[];
   onRestoreSession?: (path: string) => Promise<boolean>;
   capabilities?: WebCapabilitySnapshot;
@@ -240,6 +255,7 @@ export function ProviderSettingsPage({
   } = useSettingsCatalog(
     sessionId,
     currentModel ? `${currentModel.provider}/${currentModel.id}` : "",
+    JSON.stringify(preferences),
   );
   const setupNeedsAttention =
     currentOutcome !== undefined &&

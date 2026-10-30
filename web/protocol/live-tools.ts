@@ -3,8 +3,11 @@ import type { WebLiveMessage, WebMessagePart } from "./types.ts";
 
 /** Input is the bounded Host protocol; partial results are complete snapshots. */
 export function reduceLiveTools(current: LiveToolEvidence[], type: string, detail: Record<string, unknown>) {
-  if (["session_start", "session_switched", "session_created"].includes(type)) return [];
-  if (["agent_settled", "turn_settled"].includes(type)) return current.map((item) => item.state === "running" ? { ...item, state: "unknown" as const } : item);
+  if (["session_start", "session_switched", "session_created"].includes(type)) return current.length === 0 ? current : [];
+  if (["agent_settled", "turn_settled"].includes(type)) {
+    if (!current.some((item) => item.state === "running")) return current;
+    return current.map((item) => item.state === "running" ? { ...item, state: "unknown" as const } : item);
+  }
   if (!type.startsWith("tool_execution_")) return current;
   const id = detail.toolCallId;
   if (typeof id !== "string" || id.length > 500) return current;
@@ -17,8 +20,10 @@ export function reduceLiveTools(current: LiveToolEvidence[], type: string, detai
   if (!call || call.evidenceTruncated && call.id?.includes("[truncated]")) return current;
   const rawResult = evidenceRecord(detail.result);
   const result = typeof rawResult.content === "string" ? rawResult as unknown as WebLiveMessage : existing?.result;
-  const item: LiveToolEvidence = { call, result, state: type === "tool_execution_end" ? detail.isError === true ? "failed" : "returned" : "running" };
-  const next = [...current.filter((entry) => entry.call.id !== id), item].slice(-LIVE_TOOL_LIMIT);
+  const parentToolCallId = typeof detail.parentToolCallId === "string" && detail.parentToolCallId.length <= 500 ? detail.parentToolCallId : existing?.parentToolCallId;
+  const item: LiveToolEvidence = { call, result, ...(parentToolCallId ? { parentToolCallId } : {}), state: type === "tool_execution_end" ? detail.isError === true ? "failed" : "returned" : "running" };
+  // A parallel call finishing first must not move ahead of calls started earlier.
+  const next = (existing ? current.map((entry) => entry.call.id === id ? item : entry) : [...current, item]).slice(-LIVE_TOOL_LIMIT);
   while (next.length > 0 && new TextEncoder().encode(JSON.stringify(next)).byteLength > 512 * 1024) next.shift();
   return next;
 }

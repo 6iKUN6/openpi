@@ -55,6 +55,7 @@ import type {
   SpawnTask,
   SubagentEvent,
   SubagentMeta,
+  SubagentSpend,
   TranscriptPart,
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
@@ -241,10 +242,7 @@ const makePiSession = (
             options.sessionFactory ?? createAgentSession
           )({
             cwd: task.cwd,
-            sessionManager:
-              task.origin === "btw"
-                ? SessionManager.inMemory(task.cwd)
-                : SessionManager.create(task.cwd),
+            sessionManager: SessionManager.create(task.cwd),
             settingsManager,
             resourceLoader: loader,
             model,
@@ -353,16 +351,32 @@ const makePiSession = (
         backend: "pi",
         modelLabel: m ? `${m.provider}/${m.id}` : undefined,
         contextWindow: m?.contextWindow,
+        sessionId: session.sessionManager.getSessionId?.(),
         sessionFilePath: session.sessionFile,
       };
     };
 
     const emitUsage = () => {
       const usage = session.getContextUsage();
+      let spend: SubagentSpend | undefined;
+      try {
+        const stats = session.getSessionStats?.();
+        if (stats) {
+          spend = {
+            input: stats.tokens.input,
+            output: stats.tokens.output,
+            cacheRead: stats.tokens.cacheRead,
+            cacheWrite: stats.tokens.cacheWrite,
+          };
+        }
+      } catch {
+        // Session stats are observational; never fail a run over them.
+      }
       emit({
         _tag: "UsageChanged",
         tokens: usage?.tokens ?? undefined,
         contextWindow: activeModel()?.contextWindow ?? usage?.contextWindow,
+        ...(spend ? { spend } : {}),
       });
     };
 
@@ -402,6 +416,8 @@ const makePiSession = (
     const settle = (prompt = state.activePrompt) => {
       if (!prompt || state.activePrompt !== prompt || state.settled) return;
       state.settled = true;
+      // Final cumulative spend before the settled snapshot is read.
+      emitUsage();
       const last = prompt.lastAssistant;
       const partialText = prompt.liveText || prompt.finalText || undefined;
       const errorText =
@@ -740,7 +756,11 @@ const makePiSession = (
       state.activePrompt = activePrompt;
       capturedStructured = undefined;
       state.settled = false;
-      emit({ _tag: "RunStarted", generation: activePrompt.generation });
+      emit({
+        _tag: "RunStarted",
+        generation: activePrompt.generation,
+        startEntryId: activePrompt.startEntryId,
+      });
       let prompt: Promise<void>;
       try {
         prompt = session.prompt(text, {

@@ -1,7 +1,8 @@
-import { List, ListItem } from "@astryxdesign/core/List";
-import { ArrowLeft, Bot, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, Bot, RefreshCw, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useStore } from "zustand";
+import { formatSubagentSpend } from "../../../../../extensions/shared/context-utilization.ts";
 import type {
   WebCapabilityProjection,
   WebSubagentActivity,
@@ -13,65 +14,17 @@ import type {
 import { Markdown } from "../../components/Markdown.tsx";
 import { formatElapsedMs } from "../../lib/format.ts";
 import { WebApiError, WebClient } from "../../protocol/client.ts";
+import { webStore } from "../../store/web-store.ts";
+import { ArtifactContext } from "../artifacts/context.ts";
+import { Transcript } from "../transcript/Transcript.tsx";
 import type { RecordedSubagent } from "./recorded-subagents.ts";
 import { SubagentAvatar } from "./SubagentAvatar.tsx";
 import { subagentOverview } from "./subagent-overview.ts";
-
-// Bounded transcript projections have no message IDs and drop older entries.
-// Content + duplicate occurrence keeps disclosures on their own message as
-// that window advances, without assigning display identity from array indices.
-function withContentKeys<T>(items: readonly T[]) {
-  const occurrences = new Map<string, number>();
-  return items.map((item) => {
-    const content = JSON.stringify(item);
-    const occurrence = occurrences.get(content) ?? 0;
-    occurrences.set(content, occurrence + 1);
-    return { item, key: `${content}:${occurrence}` };
-  });
-}
-
-function ToolStep({
-  name,
-  args,
-  output,
-  state,
-}: {
-  name: string;
-  args?: string;
-  output?: string;
-  state: "running" | "done" | "error" | "unknown";
-}) {
-  const { t } = useTranslation();
-  return (
-    <details className={`subagent-tool ${state}`} data-status={state}>
-      <summary>
-        <code>{name}</code>
-        <span className={`subagent-state ${state}`}>
-          {t(`subagentTool_${state}`)}
-        </span>
-      </summary>
-      {args && (
-        <>
-          <strong className="subagent-tool-label">
-            {t("trajectoryArguments")}
-          </strong>
-          <pre>{args}</pre>
-        </>
-      )}
-      {output && (
-        <>
-          <strong className="subagent-tool-label">
-            {t("trajectoryOutput")}
-          </strong>
-          <pre>{output}</pre>
-        </>
-      )}
-    </details>
-  );
-}
+import { subagentTranscriptSnapshot } from "./subagent-transcript.ts";
 
 export function SubagentDetailView({
   sessionId,
+  sessionPath,
   id,
   kind = "subagents",
   activity,
@@ -83,8 +36,10 @@ export function SubagentDetailView({
   active = true,
   refreshRevision = 0,
   onDetail,
+  showModel = true,
 }: {
   sessionId: string;
+  sessionPath?: string;
   id: string;
   kind?: "subagents" | "workflows";
   activity?: WebSubagentActivity | WebWorkflowAgentActivity;
@@ -95,7 +50,8 @@ export function SubagentDetailView({
   readOnlyNote?: boolean;
   active?: boolean;
   refreshRevision?: number;
-  onDetail?: (detail: WebSubagentDetail) => void;
+  onDetail?: (detail: WebSubagentDetail | WebWorkflowAgentDetail) => void;
+  showModel?: boolean;
 }) {
   const { t } = useTranslation();
   const [detail, setDetail] = useState<
@@ -105,8 +61,22 @@ export function SubagentDetailView({
   const [loading, setLoading] = useState(true);
   const [revision, refresh] = useState(0);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
-  const viewport = useRef<HTMLDivElement>(null);
-  const pinned = useRef(true);
+  const preferences = useStore(
+    webStore,
+    (state) => state.snapshot?.preferences,
+  );
+  const transcript = useMemo(
+    () =>
+      detail
+        ? subagentTranscriptSnapshot(
+            sessionId,
+            detail,
+            preferences ?? { theme: "system" },
+            t("subagentThinkingRedacted"),
+          )
+        : null,
+    [sessionId, detail, preferences, t],
+  );
   const detailListener = useRef(onDetail);
   detailListener.current = onDetail;
 
@@ -132,8 +102,18 @@ export function SubagentDetailView({
       let running = activity?.status === "running";
       try {
         const response = await (kind === "workflows"
-          ? client.workflowAgentDetail(sessionId, id, controller.signal)
-          : client.subagentDetail(sessionId, id, controller.signal));
+          ? client.workflowAgentDetail(
+              sessionId,
+              id,
+              controller.signal,
+              ...(sessionPath ? ([sessionPath] as const) : []),
+            )
+          : client.subagentDetail(
+              sessionId,
+              id,
+              controller.signal,
+              ...(sessionPath ? ([sessionPath] as const) : []),
+            ));
         if (controller.signal.aborted) return;
         if (
           response.sessionId !== sessionId ||
@@ -146,8 +126,7 @@ export function SubagentDetailView({
         }
         running = response.detail.status === "running";
         setDetail(response.detail);
-        if (response.detail.kind === "subagents")
-          detailListener.current?.(response.detail);
+        detailListener.current?.(response.detail);
         setError(null);
         setUpdatedAt(new Date().toLocaleTimeString());
       } catch (caught) {
@@ -183,6 +162,7 @@ export function SubagentDetailView({
     active,
     client,
     sessionId,
+    sessionPath,
     id,
     kind,
     activity?.status,
@@ -192,36 +172,13 @@ export function SubagentDetailView({
     t,
   ]);
 
-  useLayoutEffect(() => {
-    void detail;
-    const element = viewport.current;
-    if (element && pinned.current) element.scrollTop = element.scrollHeight;
-  }, [detail]);
-
-  const results = new Map(
-    detail?.transcript.flatMap((item) =>
-      item.kind === "toolResult" ? [[item.toolId, item] as const] : [],
-    ),
-  );
-  const calls = new Set(
-    detail?.transcript.flatMap((item) =>
-      item.kind === "assistant"
-        ? item.parts.flatMap((part) =>
-            part.type === "toolCall" ? [part.toolId] : [],
-          )
-        : [],
-    ),
-  );
   const state =
-    detail?.outcome === "interrupted" ? "interrupted" : detail?.status;
-  const finalInTranscript = detail?.transcript.some(
-    (item) =>
-      item.kind === "assistant" &&
-      item.parts
-        .flatMap((part) => (part.type === "text" ? [part.text] : []))
-        .join("\n")
-        .trim() === detail.finalText.trim(),
-  );
+    detail?.outcome === "interrupted"
+      ? "interrupted"
+      : detail?.status === "unknown"
+        ? undefined
+        : detail?.status;
+  const spend = formatSubagentSpend(detail?.spend);
   const SectionHeading = fullView ? "h2" : "h3";
   return (
     <section
@@ -234,15 +191,16 @@ export function SubagentDetailView({
           <span className={`subagent-state ${state ?? "unknown"}`}>
             {state
               ? t(`subagentState_${state}`)
-              : saved?.state
+              : !detail && saved?.state
                 ? `${t("subagentRecordedState")}: ${t(`subagentState_${saved.state}`)}`
                 : t("unknownState")}
           </span>
-          {detail && (
-            <span className="subagent-duration">
-              {formatElapsedMs(detail.createdAt, detail.settledAt)}
-            </span>
-          )}
+          {detail &&
+            (detail.status === "running" || detail.settledAt !== undefined) && (
+              <span className="subagent-duration">
+                {formatElapsedMs(detail.createdAt, detail.settledAt)}
+              </span>
+            )}
         </div>
         <button
           type="button"
@@ -257,7 +215,16 @@ export function SubagentDetailView({
           <RefreshCw />
         </button>
       </header>
-      {loading && !detail && <p role="status">{t("inspectionLoading")}</p>}
+      {loading && !detail && (
+        <div className="inspection-loading" role="status">
+          <p>{t("inspectionLoading")}</p>
+          <div aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </div>
+        </div>
+      )}
       {error && (
         <div className="inspection-warning" role="alert">
           <p>{detail ? t("subagentStale") : t("subagentUnavailable")}</p>
@@ -268,7 +235,8 @@ export function SubagentDetailView({
         <>
           <div className="subagent-metadata">
             <code>{detail.id}</code>
-            {detail.model && <span>{detail.model}</span>}
+            {showModel && detail.model && <span>{detail.model}</span>}
+            {spend && <span title={t("subagentSpend")}>{spend}</span>}
             <span title={detail.cwd}>{detail.cwd}</span>
           </div>
           <details className="subagent-task">
@@ -280,135 +248,51 @@ export function SubagentDetailView({
               {detail.errorText}
             </p>
           )}
-          {detail.truncated && (
-            <p className="inspection-note">
-              {t("subagentTruncated", { count: detail.omittedEntries })}
-            </p>
-          )}
-          {detail.kind === "workflows" && detail.transcriptUnavailable && (
-            <p className="inspection-note">
-              {t("subagentTranscriptUnavailable")}
-            </p>
-          )}
-          <div
-            className="subagent-transcript"
-            ref={viewport}
-            role="log"
-            aria-label={t("subagentTranscript")}
-            onScroll={(event) => {
-              const el = event.currentTarget;
-              pinned.current =
-                el.scrollHeight - el.clientHeight - el.scrollTop < 48;
-            }}
-          >
-            {withContentKeys(detail.transcript).map(({ item, key }) => (
-              <div
-                className={`subagent-message ${item.kind}`}
-                data-role={item.kind}
-                key={key}
-              >
-                {item.kind === "user" ? (
-                  <p className="subagent-user-message">{item.text}</p>
-                ) : item.kind === "toolResult" ? (
-                  calls.has(item.toolId) ? null : (
-                    <ToolStep
-                      name={item.name}
-                      output={item.outputPreview}
-                      state={item.isError ? "error" : "done"}
-                    />
-                  )
-                ) : (
-                  withContentKeys(item.parts).map(
-                    ({ item: part, key: partKey }) =>
-                      part.type === "text" ? (
-                        <Markdown key={partKey}>{part.text}</Markdown>
-                      ) : part.type === "thinking" ? (
-                        <details
-                          className="subagent-thinking done"
-                          data-status="done"
-                          key={partKey}
-                        >
-                          <summary>{t("thinkingDone")}</summary>
-                          <pre>
-                            {part.redacted
-                              ? t("subagentThinkingRedacted")
-                              : part.text}
-                          </pre>
-                        </details>
-                      ) : (
-                        <ToolStep
-                          key={part.toolId}
-                          name={part.name}
-                          args={part.argsPreview}
-                          output={
-                            results.get(part.toolId)?.outputPreview ??
-                            detail.liveTools.find(
-                              (tool) => tool.toolId === part.toolId,
-                            )?.outputPreview
-                          }
-                          state={
-                            results.has(part.toolId)
-                              ? results.get(part.toolId)!.isError
-                                ? "error"
-                                : "done"
-                              : detail.liveTools.some(
-                                    (tool) =>
-                                      tool.toolId === part.toolId && !tool.done,
-                                  )
-                                ? "running"
-                                : "unknown"
-                          }
-                        />
-                      ),
-                  )
-                )}
-              </div>
-            ))}
-            {detail.liveAssistant?.thinking && (
-              <details
-                className="subagent-thinking running"
-                data-status="running"
-              >
-                <summary>{t("thinkingActive")}</summary>
-                <pre>{detail.liveAssistant.thinking}</pre>
-              </details>
-            )}
-            {detail.liveAssistant?.text && (
-              <div
-                className="subagent-message assistant live"
-                data-role="assistant"
-              >
-                <Markdown>{detail.liveAssistant.text}</Markdown>
-              </div>
-            )}
-            {detail.liveTools
-              .filter((tool) => !calls.has(tool.toolId))
-              .map((tool) => (
-                <ToolStep
-                  key={tool.toolId}
-                  name={tool.name}
-                  args={tool.argsPreview}
-                  output={tool.outputPreview}
-                  state={
-                    tool.done ? (tool.isError ? "error" : "done") : "running"
+          <div className="subagent-conversation">
+            <ArtifactContext.Provider value={null}>
+              {transcript && (
+                <Transcript
+                  snapshot={transcript}
+                  label={t("subagentTranscript")}
+                  activityObserved={active && !error}
+                  liveMessages={[]}
+                  liveRunning={detail.status === "running"}
+                  livePhase={detail.status === "running" ? "running" : "idle"}
+                  liveRetry={null}
+                  thinkingStarts={{}}
+                  thinkingDurations={{}}
+                  scrollToBottom={0}
+                  notice={
+                    <>
+                      {detail.truncated && (
+                        <p className="inspection-note">
+                          {t(
+                            detail.omittedEntries > 0
+                              ? "subagentTruncated"
+                              : "subagentTextTruncated",
+                            { count: detail.omittedEntries },
+                          )}
+                        </p>
+                      )}
+                      {detail.kind === "workflows" &&
+                      detail.transcriptUnavailable ? (
+                        <p className="inspection-note">
+                          {t("subagentTranscriptUnavailable")}
+                        </p>
+                      ) : !detail.transcript.length &&
+                        !detail.liveAssistant?.text &&
+                        !detail.liveAssistant?.thinking &&
+                        !detail.liveTools.length &&
+                        !detail.finalText ? (
+                        <p className="inspection-note">
+                          {t("subagentNoMessages")}
+                        </p>
+                      ) : null}
+                    </>
                   }
                 />
-              ))}
-            {detail.finalText && !finalInTranscript && (
-              <section className="subagent-final">
-                <SectionHeading>{t("subagentResult")}</SectionHeading>
-                <Markdown>{detail.finalText}</Markdown>
-              </section>
-            )}
-            {detail.status === "running" && (
-              <p className="subagent-live" role="status">
-                {t("subagentLive")}
-              </p>
-            )}
-            {!detail.transcript.length &&
-              !detail.liveAssistant?.text &&
-              !(detail.kind === "workflows" && detail.transcriptUnavailable) &&
-              !detail.finalText && <p>{t("subagentNoMessages")}</p>}
+              )}
+            </ArtifactContext.Provider>
           </div>
           {(readOnlyNote || updatedAt) && (
             <p className="subagent-footnote">
@@ -446,6 +330,7 @@ export function SubagentDetailView({
 
 export function SubagentPanel({
   sessionId,
+  sessionPath,
   initialId,
   initialKind = "subagents",
   activity,
@@ -456,6 +341,7 @@ export function SubagentPanel({
   onClose,
 }: {
   sessionId: string;
+  sessionPath?: string;
   initialId?: string;
   initialKind?: "subagents" | "workflows";
   activity?: WebCapabilityProjection<WebSubagentActivity>;
@@ -474,6 +360,11 @@ export function SubagentPanel({
     kind: "subagents" | "workflows";
   } | null>(initialId ? { id: initialId, kind: initialKind } : null);
   const [detailTarget, setDetailTarget] = useState(selection);
+  const [modelIdentity, setModelIdentity] = useState<{
+    id: string;
+    kind: "subagents" | "workflows";
+    model?: string;
+  } | null>(null);
   const selectedId = selection?.id;
   useLayoutEffect(() => {
     if (!selectedId && listViewport.current)
@@ -502,6 +393,14 @@ export function SubagentPanel({
   const items = liveAvailable ? (activity?.items ?? []) : [];
   const workflowItems = liveAvailable ? (workflows?.items ?? []) : [];
   const allTasks = subagentOverview(items, records, workflowItems, observed);
+  const [now, setNow] = useState(Date.now);
+  const hasRunningTasks = allTasks.some((item) => item.state === "running");
+  useEffect(() => {
+    if (!hasRunningTasks || selectedId) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [hasRunningTasks, selectedId]);
   const omittedTasks =
     (activity?.omitted ?? 0) +
     workflowItems.reduce((sum, item) => sum + (item.children?.omitted ?? 0), 0);
@@ -512,6 +411,10 @@ export function SubagentPanel({
     selection?.kind === "subagents"
       ? records.find((item) => item.id === selectedId)
       : undefined;
+  const model =
+    modelIdentity?.id === selectedId && modelIdentity?.kind === selection?.kind
+      ? modelIdentity?.model
+      : saved?.model;
   const navigationButton = useRef<HTMLButtonElement>(null);
   const previousFocus = useRef(document.activeElement);
   useEffect(() => {
@@ -605,12 +508,17 @@ export function SubagentPanel({
           ) : (
             <Bot aria-hidden="true" />
           )}
-          <Heading>
+          <Heading title={selected?.title || saved?.title || selectedId}>
             {selectedId
               ? selected?.title || saved?.title || selectedId
               : t("subagentDetails")}
           </Heading>
         </div>
+        {selectedId && model && (
+          <span className="subagent-panel-model" title={model}>
+            {model.split("/").at(-1)}
+          </span>
+        )}
         <button
           ref={selectedId ? undefined : navigationButton}
           type="button"
@@ -625,6 +533,7 @@ export function SubagentPanel({
         <SubagentDetailView
           key={`${sessionId}:${detailTarget.kind}:${detailTarget.id}`}
           sessionId={sessionId}
+          sessionPath={sessionPath}
           id={detailTarget.id}
           kind={detailTarget.kind}
           activity={
@@ -642,7 +551,17 @@ export function SubagentPanel({
           }
           liveAvailable={liveAvailable}
           fullView={fullView}
+          showModel={false}
           active={Boolean(selectedId)}
+          onDetail={(detail) =>
+            setModelIdentity((previous) =>
+              previous?.id === detail.id &&
+              previous.kind === detail.kind &&
+              previous.model === detail.model
+                ? previous
+                : { id: detail.id, kind: detail.kind, model: detail.model },
+            )
+          }
         />
       )}
       {!selectedId && (
@@ -667,50 +586,45 @@ export function SubagentPanel({
                   <span>{group.items.length}</span>
                 </GroupHeading>
                 {!group.items.length && group.empty && <p>{t(group.empty)}</p>}
-                <List density="compact">
-                  {visible.map((item) => (
-                    <ListItem
-                      key={`${item.kind}:${item.id}`}
-                      className="subagent-task-row"
-                      onClick={() => select(item.id, item.kind)}
-                      label={
-                        <>
+                <ul className="subagent-task-list">
+                  {visible.map((item) => {
+                    const state = item.state ?? "unknown";
+                    const status = t(`subagentState_${state}`);
+                    const description =
+                      item.state === "running"
+                        ? item.taskPreview || t("subagentProcessing")
+                        : item.state === "done"
+                          ? undefined
+                          : status;
+                    return (
+                      <li key={`${item.kind}:${item.id}`}>
+                        <button
+                          type="button"
+                          className={`subagent-task-row ${state}`}
+                          aria-label={`${item.title || item.id} · ${status}${item.taskPreview && description ? ` · ${description}` : ""}`}
+                          onClick={() => select(item.id, item.kind)}
+                        >
+                          <SubagentAvatar
+                            identity={`${sessionId}:${item.id}`}
+                          />
+                          {(state === "running" || state === "done") && (
+                            <span className="subagent-task-status">
+                              {status}
+                            </span>
+                          )}
                           <span
                             className="subagent-task-title"
                             title={item.title || item.id}
                           >
                             {item.title || item.id}
                           </span>
-                          <span className="sr-only">
-                            {` · ${t(`subagentState_${item.state ?? "unknown"}`)}`}
-                          </span>
-                        </>
-                      }
-                      description={
-                        item.saved
-                          ? t("subagentSaved")
-                          : item.state === "error" ||
-                              item.state === "interrupted"
-                            ? t(`subagentState_${item.state}`)
-                            : undefined
-                      }
-                      startContent={
-                        <SubagentAvatar identity={`${sessionId}:${item.id}`} />
-                      }
-                      endContent={
-                        <span className="subagent-task-end">
                           {item.state === "running" ? (
-                            <>
-                              <LoaderCircle
-                                className="subagent-running-icon"
-                                aria-hidden="true"
-                              />
-                              <span className="sr-only">
-                                {t("subagentState_running")}
-                              </span>
-                            </>
+                            <span className="subagent-task-end">
+                              {formatElapsedMs(item.createdAt, now)}
+                            </span>
                           ) : item.timestamp ? (
                             <time
+                              className="subagent-task-end"
                               dateTime={new Date(item.timestamp).toISOString()}
                               title={new Date(item.timestamp).toLocaleString(
                                 i18n.language,
@@ -719,11 +633,16 @@ export function SubagentPanel({
                               {relativeTime(item.timestamp)}
                             </time>
                           ) : null}
-                        </span>
-                      }
-                    />
-                  ))}
-                </List>
+                          {description && (
+                            <span className="subagent-task-description">
+                              {description}
+                            </span>
+                          )}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
                 {visible.length < group.items.length && (
                   <button
                     type="button"
