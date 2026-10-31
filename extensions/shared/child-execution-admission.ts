@@ -259,9 +259,10 @@ export function sessionChildExecutionAdmission(
 ) {
   let admission = sessionAdmissions.get(sessionOwner);
   // Pi's reload emits session_shutdown and then session_start for the same
-  // SessionManager. A shut-down pool rejects every acquire, so the reloaded
-  // extensions start a fresh one, as separate module copies did before.
-  if (!admission || admission.isShutdown) {
+  // SessionManager. Replace a shut-down pool only after every old attempt has
+  // released its lease. Uncertain cleanup must remain visible and fail closed
+  // across reloads; late terminal callbacks still release into this owner.
+  if (!admission || (admission.isShutdown && admission.snapshot().held === 0)) {
     admission = new ChildExecutionAdmission(options);
     sessionAdmissions.set(sessionOwner, admission);
   }

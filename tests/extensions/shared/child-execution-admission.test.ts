@@ -283,7 +283,30 @@ test("FAIL: Pi-loaded extensions share one admission per Session and a fresh one
     const reloaded = factories.direct(session);
     assert.notEqual(reloaded, workflow);
     assert.equal(factories.workflow(session), reloaded);
-    (await reloaded.acquire("direct")).release();
+    const lateLease = await reloaded.acquire("workflow");
+    reloaded.shutdown();
+    const blocked = factories.direct(session);
+    assert.equal(
+      getSessionChildExecutionAdmission(session)?.snapshot().held,
+      1,
+    );
+    await assert.rejects(
+      blocked.acquire("direct"),
+      /parent Session is shutting down/,
+    );
+    assert.equal(factories.workflow(session), blocked);
+
+    lateLease.release();
+    assert.equal(
+      getSessionChildExecutionAdmission(session)?.snapshot().held,
+      0,
+    );
+    const recovered = factories.workflow(session);
+    assert.equal(factories.direct(session), recovered);
+    const recoveredLease = await recovered.acquire("direct");
+    lateLease.release();
+    assert.equal(recovered.snapshot().held, 1);
+    recoveredLease.release();
   } finally {
     Reflect.deleteProperty(globalThis, sink);
     await rm(directory, { recursive: true, force: true });
