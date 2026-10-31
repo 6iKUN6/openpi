@@ -447,24 +447,44 @@ export interface BoundedTranscriptsArtifact {
  * unchanged agents keep the same array and reuse this between checkpoints.
  */
 interface EncodedAgentTranscript {
-  readonly entryCount: number;
-  /** Pretty JSON nested one level deep, as `JSON.stringify` measures it. */
-  readonly measured: string;
-  readonly measuredBytes: number;
-  /** The same entries after `toSerializable`, nested one level deep. */
+  /** The entries after `toSerializable`, nested one level deep. */
   readonly serialized: string;
   /** `toSerializable` nodes; undefined when the shape is not plain data. */
   readonly nodes: number | undefined;
 }
 
-const encodedTranscripts = new WeakMap<
+// Omitted agents need only sizing metadata. Never retain their measured JSON:
+// live workflows can keep thousands of transcript arrays reachable.
+const transcriptMeasurements = new WeakMap<
   readonly TranscriptEntry[],
   {
     readonly length: number;
     readonly last: TranscriptEntry | undefined;
-    readonly encoded: EncodedAgentTranscript;
+    readonly entryCount: number;
+    readonly measuredBytes: number;
   }
 >();
+
+// A process-wide LRU bounds both encoded text and bookkeeping, even across
+// concurrent workflows or caller-supplied artifact budgets. Charge UTF-16
+// storage conservatively using twice the UTF-8 byte length.
+const ENCODED_TRANSCRIPTS_MAX_BYTES = 4 * 1024 * 1024;
+const ENCODED_TRANSCRIPTS_MAX_ENTRIES = 128;
+const encodedTranscripts = new WeakMap<
+  readonly TranscriptEntry[],
+  WeakRef<EncodedAgentTranscript>
+>();
+const retainedTranscripts = new Map<EncodedAgentTranscript, number>();
+let encodedTranscriptBytes = 0;
+
+function forgetEncodedTranscript(transcript: readonly TranscriptEntry[]) {
+  const cached = encodedTranscripts.get(transcript)?.deref();
+  if (cached) {
+    encodedTranscriptBytes -= retainedTranscripts.get(cached) ?? 0;
+    retainedTranscripts.delete(cached);
+  }
+  encodedTranscripts.delete(transcript);
+}
 
 const nestOneLevel = (json: string) => json.replaceAll("\n", "\n  ");
 
@@ -488,18 +508,34 @@ function plainNodes(value: unknown, depth = 0): number | undefined {
   return nodes;
 }
 
-function encodeAgentTranscript(transcript: readonly TranscriptEntry[]) {
+function measureAgentTranscript(transcript: readonly TranscriptEntry[]) {
   const last = transcript.at(-1);
-  const cached = encodedTranscripts.get(transcript);
+  const cached = transcriptMeasurements.get(transcript);
   // Guard the identity cache against an in-place append or replacement.
   if (cached?.length === transcript.length && cached.last === last)
-    return cached.encoded;
+    return cached;
+  forgetEncodedTranscript(transcript);
   const entries = boundedArtifactTranscript(transcript);
-  const measured = nestOneLevel(JSON.stringify(entries, null, 2));
-  const encoded: EncodedAgentTranscript = {
+  const measurement = {
+    length: transcript.length,
+    last,
     entryCount: entries.length,
-    measured,
-    measuredBytes: textBytes(measured),
+    measuredBytes: textBytes(nestOneLevel(JSON.stringify(entries, null, 2))),
+  };
+  transcriptMeasurements.set(transcript, measurement);
+  return measurement;
+}
+
+function encodeAgentTranscript(transcript: readonly TranscriptEntry[]) {
+  const cached = encodedTranscripts.get(transcript)?.deref();
+  const cachedBytes = cached && retainedTranscripts.get(cached);
+  if (cached && cachedBytes !== undefined) {
+    retainedTranscripts.delete(cached);
+    retainedTranscripts.set(cached, cachedBytes);
+    return cached;
+  }
+  const entries = boundedArtifactTranscript(transcript);
+  const encoded: EncodedAgentTranscript = {
     serialized: nestOneLevel(
       JSON.stringify(
         toSerializable(entries, { maxNodes: Number.POSITIVE_INFINITY }),
@@ -509,11 +545,20 @@ function encodeAgentTranscript(transcript: readonly TranscriptEntry[]) {
     ),
     nodes: plainNodes(entries),
   };
-  encodedTranscripts.set(transcript, {
-    length: transcript.length,
-    last,
-    encoded,
-  });
+  const retainedBytes = 2 * textBytes(encoded.serialized);
+  if (retainedBytes <= ENCODED_TRANSCRIPTS_MAX_BYTES) {
+    while (
+      encodedTranscriptBytes + retainedBytes > ENCODED_TRANSCRIPTS_MAX_BYTES ||
+      retainedTranscripts.size >= ENCODED_TRANSCRIPTS_MAX_ENTRIES
+    ) {
+      const oldest = retainedTranscripts.keys().next().value!;
+      encodedTranscriptBytes -= retainedTranscripts.get(oldest)!;
+      retainedTranscripts.delete(oldest);
+    }
+    encodedTranscripts.set(transcript, new WeakRef(encoded));
+    retainedTranscripts.set(encoded, retainedBytes);
+    encodedTranscriptBytes += retainedBytes;
+  }
   return encoded;
 }
 
@@ -534,7 +579,8 @@ function assembleTranscripts(
  * serializer's node budget, which previously stopped at 20_000 nodes — roughly
  * 11 full agents — while the file sat at a quarter of its byte cap (issue #558).
  *
- * Each agent is bounded and encoded once per transcript array, so a checkpoint
+ * Agent measurements are weakly cached; only the kept prefix is encoded, with
+ * a bounded cache for serialized fragments. A checkpoint
  * where one child changed does not re-serialize every finished child. The
  * result is byte-identical to serializing the whole object; any shape the
  * fragment assembly cannot reproduce exactly takes the whole-object path.
@@ -559,14 +605,15 @@ export function boundedTranscriptsArtifact(
     );
   if (!integerKeys) return wholeTranscriptsArtifact(agents, maxBytes, maxNodes);
 
-  const encoded = agents.map((agent) => ({
+  const measured = agents.map((agent) => ({
     index: agent.index,
-    ...encodeAgentTranscript(agent.transcript),
+    transcript: agent.transcript,
+    ...measureAgentTranscript(agent.transcript),
   }));
   // Byte size of the pretty object holding the first `count` agents.
   let kept = 0;
   let bytes = 2;
-  for (const agent of encoded) {
+  for (const agent of measured) {
     // "{}" grows to "{\n<line>\n}", then by ",\n<line>": 2 bytes either way.
     const next =
       bytes + 2 + textBytes(`  "${agent.index}": `) + agent.measuredBytes;
@@ -575,10 +622,13 @@ export function boundedTranscriptsArtifact(
     kept++;
   }
   let omittedEntries = 0;
-  for (let i = kept; i < encoded.length; i++)
-    omittedEntries += encoded[i]!.entryCount;
+  for (let i = kept; i < measured.length; i++)
+    omittedEntries += measured[i]!.entryCount;
 
-  const keptAgents = encoded.slice(0, kept);
+  const keptAgents = measured.slice(0, kept).map((agent) => ({
+    index: agent.index,
+    ...encodeAgentTranscript(agent.transcript),
+  }));
   const nodes = keptAgents.reduce<number | undefined>(
     (total, agent) =>
       total === undefined || agent.nodes === undefined
@@ -593,7 +643,7 @@ export function boundedTranscriptsArtifact(
     return wholeTranscriptsArtifact(agents, maxBytes, maxNodes);
   return {
     content,
-    omitted: { agents: encoded.length - kept, entries: omittedEntries },
+    omitted: { agents: measured.length - kept, entries: omittedEntries },
   };
 }
 
