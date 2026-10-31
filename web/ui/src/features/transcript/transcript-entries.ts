@@ -86,9 +86,56 @@ function legacySignature(message: WebLiveMessage) {
     : JSON.stringify({ ...message, timestamp: undefined });
 }
 
+// Transport fitting only changes text and its truncation flags. Qualify every
+// retained field and part, including thinking, rather than treating an empty
+// visible reply (or a shared prefix) as proof of message identity.
+function matchesTransportProjection(
+  live: WebLiveMessage,
+  native: WebLiveMessage,
+) {
+  let retainedPrefix = false;
+  const textMatches = (short: string, full: string) => {
+    if (short === full) return true;
+    if (!short.endsWith("\n[truncated]")) return false;
+    const prefix = short.slice(0, -"\n[truncated]".length);
+    if (prefix.length) retainedPrefix = true;
+    return full.startsWith(prefix);
+  };
+  if (!textMatches(live.content, native.content)) return false;
+  if (live.parts?.length !== native.parts?.length) return false;
+  const parts = live.parts?.map((part, index) => {
+    const original = native.parts?.[index];
+    if (
+      (part.type === "text" || part.type === "thinking") &&
+      original?.type === part.type &&
+      textMatches(part.text, original.text)
+    ) {
+      return part.type === "thinking" && original.type === "thinking"
+        ? {
+            ...part,
+            text: original.text,
+            textTruncated: original.textTruncated,
+          }
+        : { ...part, text: original.text };
+    }
+    return part;
+  });
+  return (
+    retainedPrefix &&
+    JSON.stringify({
+      ...live,
+      content: native.content,
+      parts,
+      truncation: native.truncation,
+      timestamp: undefined,
+    }) === JSON.stringify({ ...native, timestamp: undefined })
+  );
+}
+
 export interface TranscriptPresentationState {
   nativeRowKeys: Map<string, string>;
   ambiguousTimingIds: Set<string>;
+  nativeTimingKeys?: Map<string, string>;
 }
 
 interface PersistedProjection {
@@ -104,7 +151,6 @@ interface PersistedProjection {
   nativeMessages: {
     identity: string | undefined;
     signature: string;
-    content: string;
   }[];
   promptCandidates: {
     key: string;
@@ -239,7 +285,6 @@ function persistedTranscriptProjection(
   const nativeMessages = baseEntries.map((entry) => ({
     identity: messageIdentity(entry.message),
     signature: legacySignature(entry.message),
-    content: entry.message.content,
   }));
   const nativeByIdentity = new Map<string, number[]>();
   const nativeByLegacySignature = new Map<string, number[]>();
@@ -343,6 +388,8 @@ export function buildEntries(
   presentation: TranscriptPresentationState,
 ) {
   const { nativeRowKeys, ambiguousTimingIds } = presentation;
+  const previouslyAmbiguous = new Set(ambiguousTimingIds);
+  const nativeTimingKeys = (presentation.nativeTimingKeys ??= new Map());
   const selected = snapshot.selectedSession;
   const persisted = selected?.entries ?? [];
   const projection = persistedTranscriptProjection(persisted, selected?.id);
@@ -350,6 +397,8 @@ export function buildEntries(
     if (!projection.nativeById.has(id)) nativeRowKeys.delete(id);
   for (const id of ambiguousTimingIds)
     if (!projection.nativeById.has(id)) ambiguousTimingIds.delete(id);
+  for (const id of nativeTimingKeys.keys())
+    if (!projection.nativeById.has(id)) nativeTimingKeys.delete(id);
   // Native IDs own historic rows. A live disclosure can keep its existing DOM
   // only when both sides contain exactly one complete, equal projected payload.
   const exactLive = new Map<string, LiveEntry[]>();
@@ -378,29 +427,61 @@ export function buildEntries(
     aliasedKeys.add(key);
   }
   for (const id of projection.ambiguousNativeIds) ambiguousTimingIds.add(id);
+  const candidatesFor = (message: WebLiveMessage) => {
+    const identity = messageIdentity(message);
+    if (!message.truncation?.transport)
+      return identity === undefined
+        ? (projection.nativeByLegacySignature.get(legacySignature(message)) ??
+            [])
+        : (projection.nativeByIdentity.get(identity) ?? []).filter(
+            (index) =>
+              projection.nativeMessages[index]?.signature ===
+              legacySignature(message),
+          );
+    const indexes =
+      identity === undefined
+        ? projection.baseEntries.map((_, index) => index)
+        : (projection.nativeByIdentity.get(identity) ?? []);
+    return indexes.filter((index) =>
+      matchesTransportProjection(
+        message,
+        projection.baseEntries[index]!.message,
+      ),
+    );
+  };
   const timingAt = new Map<number, string | null>();
   const ambiguousLiveTiming = new Set<string>();
   for (const live of liveMessages) {
     const lookup = messageIdentity(live.message) ?? live.key;
-    const indexes = projection.lookupIndexes.get(lookup);
-    if (!indexes) continue;
+    const indexes = projection.lookupIndexes.get(lookup) ?? [];
     // Provider timestamps can repeat; timing must follow the same payload
     // qualification as native/live message reconciliation.
-    const signature = legacySignature(live.message);
-    const matches = indexes.filter(
-      (index) => projection.nativeMessages[index]?.signature === signature,
-    );
+    const matches = candidatesFor(live.message);
+    if (matches.length > 1)
+      for (const index of matches) {
+        const id = projection.baseEntries[index]!.entryId;
+        if (id) ambiguousTimingIds.add(id);
+      }
     if (matches.length !== indexes.length || indexes.length > 1)
       ambiguousLiveTiming.add(lookup);
     if (matches.length === 1) {
       const index = matches[0]!;
       const id = projection.baseEntries[index]!.entryId;
-      const establishedKey = id ? nativeRowKeys.get(id) : undefined;
+      const establishedKey = id
+        ? (nativeRowKeys.get(id) ?? nativeTimingKeys.get(id))
+        : undefined;
       if (
         (establishedKey && establishedKey !== live.key) ||
-        (id && ambiguousTimingIds.has(id) && !establishedKey && live.key !== id)
+        (id &&
+          ambiguousTimingIds.has(id) &&
+          !(
+            live.message.truncation?.transport && !previouslyAmbiguous.has(id)
+          ) &&
+          !establishedKey &&
+          live.key !== id)
       ) {
         ambiguousLiveTiming.add(lookup);
+        if (id) ambiguousTimingIds.add(id);
         continue;
       }
       const previous = timingAt.get(index);
@@ -410,6 +491,7 @@ export function buildEntries(
         // Equal payloads still cannot identify which live message owns timing.
         timingAt.set(index, null);
         ambiguousLiveTiming.add(lookup);
+        if (id) ambiguousTimingIds.add(id);
       }
     }
   }
@@ -521,13 +603,9 @@ export function buildEntries(
       const identity = messageIdentity(message);
       const toolIdentity = toolMessageIdentity(message);
       const legacy = legacySignature(message);
-      // A live message shortened to fit one SSE event never equals its
-      // persisted entry; the same identity with a matching text prefix does.
-      const transportPrefix = message.truncation?.transport
-        ? message.content.replace(/\n\[truncated\]$/, "")
-        : undefined;
-      const match =
-        identity === undefined
+      const match = message.truncation?.transport
+        ? firstUnmatched(candidatesFor(message), matchedMessages)
+        : identity === undefined
           ? firstUnmatched(
               projection.nativeByLegacySignature.get(legacy),
               matchedMessages,
@@ -536,11 +614,7 @@ export function buildEntries(
               (index) =>
                 (toolIdentity !== undefined || !matchedMessages.has(index)) &&
                 (toolIdentity !== undefined ||
-                  (transportPrefix !== undefined
-                    ? projection.nativeMessages[index]?.content.startsWith(
-                        transportPrefix,
-                      )
-                    : projection.nativeMessages[index]?.signature === legacy)),
+                  projection.nativeMessages[index]?.signature === legacy),
             ) ?? -1);
       if (match >= 0) {
         matchedMessages.add(match);
@@ -602,6 +676,13 @@ export function buildEntries(
   }
   for (const [index, timingKey] of timingAt) {
     if (timingKey === null) continue;
+    const current = persistedRows[index];
+    if (!current) continue;
+    if (current.entryId) nativeTimingKeys.set(current.entryId, timingKey);
+  }
+  for (const [id, timingKey] of nativeTimingKeys) {
+    const index = projection.indexById.get(id);
+    if (index === undefined) continue;
     const current = persistedRows[index];
     if (!current || current.timingKey === timingKey) continue;
     rewrite(index, { ...current, timingKey });
